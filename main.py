@@ -8,8 +8,10 @@ from typing import List, Optional
 
 # Initialize the clients
 app = FastAPI(title="Flashcard Generator API")
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
+client= genai.Client(vertexai=True, 
+                     project=os.getenv("GCP_PROJECT_ID"), 
+                     location = os.getenv("GCP_REGION")
+                )
 # Pydantic models for request/response bodies
 class Flashcard(BaseModel):
     front: str

@@ -49,7 +49,7 @@ def generate_with_gemini_and_pdf(prompt: str, pdf_uri: str) -> str:
         
         # Generate content with PDF and prompt
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-pro',
             contents=[pdf_part, prompt],
             config={
                 "temperature": 0.3,
@@ -76,7 +76,7 @@ async def generate_flashcards(request: GenerateFlashcardsRequest):
         REQUIREMENTS:
         1. Each flashcard must have a 'front' (question, term, or concept) and a 'back' (answer, definition, or explanation)
         2. Format both front and back using Markdown for better readability
-        3. For mathematical expressions, use LaTeX within $$ symbols (e.g., $$E = mc^2$$)
+        3. For mathematical expressions, use LaTeX within $..$ symbols (e.g., $E = mc^2$) or \[..\] for display mode
         4. Create comprehensive flashcards that cover key concepts from the PDF
         5. Return ONLY a valid JSON array without any additional text or markdown formatting
         6. Ensure flashcards are accurate and based solely on the PDF content
@@ -179,7 +179,7 @@ async def refine_flashcard(request: RefinementRequest):
         REQUIREMENTS:
         1. Return a SINGLE JSON object with 'front' and 'back' keys
         2. Use Markdown formatting in both front and back
-        3. For mathematical expressions, use LaTeX within $$ symbols
+        3. For mathematical expressions, use LaTeX within $..$ symbols or \[..\] for display mode
         4. Make the flashcard more accurate, comprehensive, and educational based on the PDF content
         5. Return ONLY the JSON object without any additional text
         

@@ -189,7 +189,7 @@ async def refine_flashcard(request: RefinementRequest):
         
         # Get model response
         model_output = generate_with_gemini_and_pdf(refinement_prompt, str(request.pdf_uri))
-        
+        print(request)
         # Parse the JSON response
         try:
             # Clean the response
@@ -204,6 +204,7 @@ async def refine_flashcard(request: RefinementRequest):
             flashcard_data = json.loads(cleaned_output)
             
             if isinstance(flashcard_data, dict) and 'front' in flashcard_data and 'back' in flashcard_data:
+                print(flashcard_data)
                 return RefineFlashcardResponse(
                     flashcard=Flashcard(
                         front=flashcard_data['front'].strip(),

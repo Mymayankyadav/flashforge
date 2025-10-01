@@ -4,7 +4,7 @@ from google import genai
 from google.genai.types import Part
 import os
 import json
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 # Initialize the clients
 app = FastAPI(title="Flashcard Generator API")
@@ -265,5 +265,221 @@ async def get_examples():
             ],
             "prompt": "Add mathematical formulas to explain the concept better",
             "pdf_uri": "https://example.com/document.pdf"
+        }
+    }
+
+
+class TopicNode(BaseModel):
+    topic: str
+    description: Optional[str] = None
+    page_reference: Optional[List[int]] = None
+    subtopics: Optional[List['TopicNode']] = None
+    depth: Optional[int] = 0
+
+# Make TopicNode forward reference work
+TopicNode.update_forward_refs()
+
+class TopicTreeResponse(BaseModel):
+    topic_tree: List[TopicNode]
+    total_topics: int
+    max_depth: int
+    status: str = "success"
+
+class GenerateTopicTreeRequest(BaseModel):
+    pdf_uri: HttpUrl
+    prompt: Optional[str] = "Break down this document into a hierarchical topic structure"
+    max_depth: Optional[int] = 4
+    include_page_references: Optional[bool] = True
+
+# ... (keep your existing utility functions and endpoints)
+
+@app.post("/generate-topic-tree/", response_model=TopicTreeResponse)
+async def generate_topic_tree(request: GenerateTopicTreeRequest):
+    """
+    Analyzes a PDF and breaks it down into a hierarchical topic tree structure
+    """
+    try:
+        # Construct the topic tree generation prompt
+        topic_tree_prompt = f"""
+        Analyze the provided PDF document and create a comprehensive hierarchical topic tree.
+        
+        USER REQUEST: {request.prompt}
+        
+        REQUIREMENTS:
+        1. Create a hierarchical topic tree with up to {request.max_depth} levels of depth
+        2. Each topic should have:
+           - A clear, concise topic name
+           - A brief description of what the topic covers
+           - Page references where the topic is discussed {f"(include page numbers)" if request.include_page_references else ""}
+        3. The structure should reflect the document's actual organization
+        4. Make the tree comprehensive but not overly detailed
+        5. Return ONLY valid JSON format - no additional text
+        
+        JSON FORMAT:
+        {{
+            "topics": [
+                {{
+                    "topic": "Main Topic 1",
+                    "description": "Brief description of main topic 1",
+                    "page_reference": [1, 2, 3],
+                    "subtopics": [
+                        {{
+                            "topic": "Subtopic 1.1",
+                            "description": "Description of subtopic 1.1",
+                            "page_reference": [2],
+                            "subtopics": [
+                                // More nested subtopics up to {request.max_depth} levels
+                            ]
+                        }}
+                    ]
+                }}
+            ]
+        }}
+        
+        Ensure the response is valid JSON and the structure makes educational sense.
+        """
+        
+        # Get model response with PDF URI
+        model_output = generate_with_gemini_and_pdf(topic_tree_prompt, str(request.pdf_uri))
+        
+        # Parse the JSON response
+        try:
+            # Clean the response
+            cleaned_output = model_output.strip()
+            if cleaned_output.startswith("```json"):
+                cleaned_output = cleaned_output[7:]
+            if cleaned_output.endswith("```"):
+                cleaned_output = cleaned_output[:-3]
+            cleaned_output = cleaned_output.strip()
+            
+            # Parse JSON
+            tree_data = json.loads(cleaned_output)
+            
+            # Validate and create TopicNode objects
+            if 'topics' in tree_data and isinstance(tree_data['topics'], list):
+                topic_tree = []
+                total_topics = 0
+                max_depth = 0
+                
+                def build_topic_nodes(nodes, current_depth=1):
+                    nonlocal total_topics, max_depth
+                    topic_list = []
+                    
+                    for node in nodes:
+                        if isinstance(node, dict) and 'topic' in node:
+                            # Update max depth
+                            max_depth = max(max_depth, current_depth)
+                            total_topics += 1
+                            
+                            # Build subtopics recursively
+                            subtopics = []
+                            if 'subtopics' in node and isinstance(node['subtopics'], list):
+                                subtopics = build_topic_nodes(node['subtopics'], current_depth + 1)
+                            
+                            # Create TopicNode
+                            topic_node = TopicNode(
+                                topic=node['topic'].strip(),
+                                description=node.get('description', '').strip(),
+                                page_reference=node.get('page_reference', []),
+                                subtopics=subtopics,
+                                depth=current_depth
+                            )
+                            topic_list.append(topic_node)
+                    
+                    return topic_list
+                
+                topic_tree = build_topic_nodes(tree_data['topics'])
+                
+                if not topic_tree:
+                    raise HTTPException(status_code=500, detail="No valid topic tree generated")
+                
+                return TopicTreeResponse(
+                    topic_tree=topic_tree,
+                    total_topics=total_topics,
+                    max_depth=max_depth
+                )
+            else:
+                raise HTTPException(status_code=500, detail="Invalid topic tree format in response")
+                
+        except json.JSONDecodeError as e:
+            # Try to extract JSON from response
+            import re
+            json_match = re.search(r'\{.*\}', cleaned_output, re.DOTALL)
+            if json_match:
+                try:
+                    tree_data = json.loads(json_match.group())
+                    if 'topics' in tree_data:
+                        # Re-process with the extracted JSON
+                        topic_tree = []
+                        total_topics = 0
+                        max_depth = 0
+                        
+                        def build_topic_nodes(nodes, current_depth=1):
+                            nonlocal total_topics, max_depth
+                            topic_list = []
+                            
+                            for node in nodes:
+                                if isinstance(node, dict) and 'topic' in node:
+                                    max_depth = max(max_depth, current_depth)
+                                    total_topics += 1
+                                    
+                                    subtopics = []
+                                    if 'subtopics' in node and isinstance(node['subtopics'], list):
+                                        subtopics = build_topic_nodes(node['subtopics'], current_depth + 1)
+                                    
+                                    topic_node = TopicNode(
+                                        topic=node['topic'].strip(),
+                                        description=node.get('description', '').strip(),
+                                        page_reference=node.get('page_reference', []),
+                                        subtopics=subtopics,
+                                        depth=current_depth
+                                    )
+                                    topic_list.append(topic_node)
+                            
+                            return topic_list
+                        
+                        topic_tree = build_topic_nodes(tree_data['topics'])
+                        
+                        if topic_tree:
+                            return TopicTreeResponse(
+                                topic_tree=topic_tree,
+                                total_topics=total_topics,
+                                max_depth=max_depth
+                            )
+                except:
+                    pass
+            
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to parse topic tree response as JSON: {str(e)}\nModel output: {model_output}"
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error in topic tree generation: {str(e)}")
+
+# Enhanced examples endpoint
+@app.get("/examples")
+async def get_examples():
+    return {
+        "generate_flashcards_example": {
+            "prompt": "Create flashcards about machine learning concepts",
+            "pdf_uri": "https://example.com/document.pdf",
+            "num_flashcards": 5
+        },
+        "refine_flashcard_example": {
+            "chat_history": [
+                {"role": "user", "content": "Make this flashcard more detailed"},
+                {"role": "assistant", "content": "Current flashcard content"}
+            ],
+            "prompt": "Add mathematical formulas to explain the concept better",
+            "pdf_uri": "https://example.com/document.pdf"
+        },
+        "generate_topic_tree_example": {
+            "pdf_uri": "https://example.com/document.pdf",
+            "prompt": "Break down this computer science textbook into main concepts",
+            "max_depth": 4,
+            "include_page_references": True
         }
     }

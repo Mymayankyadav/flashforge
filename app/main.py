@@ -628,8 +628,8 @@ def enhance_math_formatting_with_pdf(content: str, pdf_uri: str) -> str:
     Input: "The following are equivalent: 1.The matrix of T with respect to v1,ldots,vn is upper triangular 2. span(v1,ldots,vn) is invariant under T for each k=1,ldots,n 3. Tvk in span(v1,ldots,vn)"
     Output: "The following are equivalent:
     1. The matrix of $T$ with respect to $v_1,\\ldots,v_n$ is upper triangular
-    2. $\\text{span}(v_1,\\ldots,v_n)$ is invariant under $T$ for each $k=1,\\ldots,n$
-    3. $Tv_k \\in \\text{span}(v_1,\\ldots,v_n)$"
+    2. $\\text{'span'}(v_1,\\ldots,v_n)$ is invariant under $T$ for each $k=1,\\ldots,n$
+    3. $Tv_k \\in \\text{'span'}(v_1,\\ldots,v_n)$"
     
     Now format this content using the PDF as reference:
     """

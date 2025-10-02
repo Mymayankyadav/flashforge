@@ -641,7 +641,7 @@ def enhance_math_formatting_with_pdf(content: str, pdf_uri: str) -> str:
         )
         
         response = client.models.generate_content(
-            model="gemini-2.5-pro",
+            model="gemini-2.5-flash",
             contents=[pdf_part, prompt],
             config={
                 "temperature": 0.3,

@@ -459,7 +459,233 @@ async def generate_topic_tree(request: GenerateTopicTreeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error in topic tree generation: {str(e)}")
 
-# Enhanced examples endpoint
+# New Pydantic models for text improvement
+class TextImprovementRequest(BaseModel):
+    pdf_uri: HttpUrl
+    text: str
+    improvement_goal: Optional[str] = "Make this text more detailed, accurate, and well-formatted using the PDF content"
+    context_hint: Optional[str] = None  # Additional context about what user is trying to say
+    output_format: Optional[str] = "markdown"  # markdown, html, or plain_text
+
+class TextImprovementResponse(BaseModel):
+    original_text: str
+    improved_text: str
+    confidence_score: Optional[float] = None  # AI's confidence in understanding the intent
+    improvements_made: List[str]  # List of specific improvements
+    status: str = "success"
+
+#Enhanced text improvement endpoint with PDF context
+@app.post("/improve-text/", response_model=TextImprovementResponse)
+async def improve_text_with_pdf(request: TextImprovementRequest):
+    """
+    Takes vague, incomplete, or concise text and improves it using the PDF context.
+    The AI understands the user's intent and completes/expands the text appropriately.
+    """
+    try:
+        # Construct the improvement prompt with PDF context
+        improvement_prompt = f"""
+        You are an expert editor and content enhancer. The user has provided some text that may be:
+        - Vague or incomplete
+        - Missing context
+        - Too concise
+        - Lacking proper formatting
+        - Grammatically incorrect
+        
+        YOUR TASK:
+        Understand the user's intent from their text and improve it using the PDF document as reference.
+        
+        USER'S ORIGINAL TEXT: "{request.text}"
+        
+        IMPROVEMENT GOAL: {request.improvement_goal}
+        {f"CONTEXT HINT: {request.context_hint}" if request.context_hint else ""}
+        OUTPUT FORMAT: {request.output_format}
+        
+        REQUIREMENTS:
+        1. FIRST, analyze the PDF content to understand the context and subject matter
+        2. THEN, interpret what the user is trying to express in their original text
+        3. IMPROVE the text by:
+           - Completing incomplete thoughts
+           - Adding missing context from the PDF
+           - Correcting grammatical errors
+           - Expanding concise points with relevant details
+           - Adding proper formatting ({request.output_format.upper()} format)
+           - Including mathematical expressions in LaTeX ($...$) when needed
+        4. Maintain the original intent and core message
+        5. Make the text more professional, clear, and comprehensive
+        
+        IMPORTANT: 
+        - Use the PDF content to ensure accuracy and relevance
+        - If the original text mentions concepts from the PDF, expand on them using the PDF's information
+        - If the text is a question, provide a more complete and well-formed question
+        - If the text is a statement, make it more detailed and accurate
+        
+        RETURN FORMAT:
+        Provide a JSON object with:
+        {{
+            "improved_text": "The enhanced and completed text",
+            "confidence_score": 0.95,  # Your confidence in understanding user intent (0-1)
+            "improvements_made": [
+                "Completed incomplete sentence about X",
+                "Added mathematical notation",
+                "Expanded concept Y with details from PDF",
+                "Corrected grammar and structure"
+            ]
+        }}
+        
+        Return ONLY the JSON object, no additional text.
+        """
+        
+        # Get model response with PDF URI
+        model_output = generate_with_gemini_and_pdf(improvement_prompt, str(request.pdf_uri))
+        
+        # Parse the JSON response
+        try:
+            # Clean the response
+            cleaned_output = model_output.strip()
+            if cleaned_output.startswith("```json"):
+                cleaned_output = cleaned_output[7:]
+            if cleaned_output.endswith("```"):
+                cleaned_output = cleaned_output[:-3]
+            cleaned_output = cleaned_output.strip()
+            
+            # Parse JSON
+            improvement_data = json.loads(cleaned_output)
+            
+            # Validate response structure
+            if ('improved_text' in improvement_data and 
+                'confidence_score' in improvement_data and 
+                'improvements_made' in improvement_data):
+                
+                # Validate confidence score
+                confidence = improvement_data['confidence_score']
+                if not (0 <= confidence <= 1):
+                    confidence = 0.8  # Default confidence if invalid
+                
+                return TextImprovementResponse(
+                    original_text=request.text,
+                    improved_text=improvement_data['improved_text'].strip(),
+                    confidence_score=confidence,
+                    improvements_made=improvement_data['improvements_made'],
+                    status="success"
+                )
+            else:
+                raise HTTPException(status_code=500, detail="Invalid improvement response format")
+                
+        except json.JSONDecodeError as e:
+            # If JSON parsing fails, try to extract the improved text directly
+            # and create a basic response
+            improved_text = cleaned_output
+            if len(improved_text) > len(request.text) + 10:  # Basic check if improvement happened
+                return TextImprovementResponse(
+                    original_text=request.text,
+                    improved_text=improved_text,
+                    confidence_score=0.7,
+                    improvements_made=["Enhanced text content and formatting"],
+                    status="success"
+                )
+            else:
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Failed to parse improvement response: {str(e)}\nModel output: {model_output}"
+                )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error in text improvement: {str(e)}")
+
+# Enhanced version of your original format-content endpoint with PDF support
+class ContentFormatRequest(BaseModel):
+    content: str
+    pdf_uri: HttpUrl  # Added PDF URI for context
+    format_type: Optional[str] = "markdown"  # markdown, html, or latex
+
+class ContentFormatResponse(BaseModel):
+    original_content: str
+    formatted_content: str
+    improvements: List[str]
+    success: bool
+    error: Optional[str] = None
+
+def enhance_math_formatting_with_pdf(content: str, pdf_uri: str) -> str:
+    """Apply AI-powered math formatting using PDF context"""
+    prompt = f"""
+    Convert the following educational content to properly formatted markdown with LaTeX math mode.
+    Use the PDF document as reference to understand the context and ensure accuracy.
+    
+    CONTENT TO FORMAT: "{content}"
+    
+    FORMATTING RULES:
+    1. Wrap mathematical variables and expressions in $...$ for inline math mode
+    2. Use proper LaTeX commands: \\in, \\ldots, \\cdots, \\rightarrow, \\frac, etc.
+    3. Maintain the original meaning and structure
+    4. Correct grammar and improve clarity if needed
+    5. Use the PDF context to ensure mathematical symbols and concepts are accurate
+    6. Return only the full formatted markdown, no additional text or explanations
+    7. Don't cut any part of the original content
+    
+    Example transformation:
+    Input: "The following are equivalent: 1.The matrix of T with respect to v1,ldots,vn is upper triangular 2. span(v1,ldots,vn) is invariant under T for each k=1,ldots,n 3. Tvk in span(v1,ldots,vn)"
+    Output: "The following are equivalent:
+    1. The matrix of $T$ with respect to $v_1,\\ldots,v_n$ is upper triangular
+    2. $\\text{span}(v_1,\\ldots,v_n)$ is invariant under $T$ for each $k=1,\\ldots,n$
+    3. $Tv_k \\in \\text{span}(v_1,\\ldots,v_n)$"
+    
+    Now format this content using the PDF as reference:
+    """
+    
+    try:
+        pdf_part = Part.from_uri(
+            file_uri=pdf_uri,
+            mime_type="application/pdf"
+        )
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-pro",
+            contents=[pdf_part, prompt],
+            config={
+                "temperature": 0.3,
+                "top_p": 0.8,
+                "top_k": 40
+            }
+        )
+        return response.text.strip()
+    except Exception as e:
+        raise Exception(f"AI formatting failed: {e}")
+
+@app.post("/format-content", response_model=ContentFormatResponse)
+async def format_content_with_pdf(request: ContentFormatRequest):
+    """Transform plain text content to formatted text with LaTeX math using PDF context"""
+    try:
+        formatted_content = enhance_math_formatting_with_pdf(request.content, str(request.pdf_uri))
+        
+        # Analyze what improvements were made
+        improvements = []
+        if len(formatted_content) > len(request.content):
+            improvements.append("Expanded and clarified content")
+        if "$" in formatted_content:
+            improvements.append("Added mathematical notation")
+        if "**" in formatted_content or "#" in formatted_content:
+            improvements.append("Added markdown formatting")
+        
+        return ContentFormatResponse(
+            original_content=request.content,
+            formatted_content=formatted_content,
+            improvements=improvements,
+            success=True
+        )
+        
+    except Exception as e:
+        return ContentFormatResponse(
+            original_content=request.content,
+            formatted_content=request.content,  # Return original as fallback
+            improvements=[],
+            success=False,
+            error=str(e)
+        )
+
+
+# Update examples endpoint
 @app.get("/examples")
 async def get_examples():
     return {
@@ -468,18 +694,24 @@ async def get_examples():
             "pdf_uri": "https://example.com/document.pdf",
             "num_flashcards": 5
         },
-        "refine_flashcard_example": {
-            "chat_history": [
-                {"role": "user", "content": "Make this flashcard more detailed"},
-                {"role": "assistant", "content": "Current flashcard content"}
-            ],
-            "prompt": "Add mathematical formulas to explain the concept better",
-            "pdf_uri": "https://example.com/document.pdf"
+        "improve_text_example": {
+            "pdf_uri": "https://example.com/math-textbook.pdf",
+            "text": "matrix upper triangular equivalent conditions",
+            "improvement_goal": "Expand this into a complete mathematical statement",
+            "context_hint": "This is about linear algebra and matrix properties"
         },
-        "generate_topic_tree_example": {
+        "format_content_example": {
+            "content": "The derivative of f(x) = x^2 is 2x and the integral is x^3/3",
+            "pdf_uri": "https://example.com/calculus-textbook.pdf",
+            "format_type": "markdown"
+        },
+        "batch_improvement_example": {
             "pdf_uri": "https://example.com/document.pdf",
-            "prompt": "Break down this computer science textbook into main concepts",
-            "max_depth": 4,
-            "include_page_references": True
+            "texts": [
+                "quantum mechanics basics",
+                "schrodinger equation important",
+                "wave function probability"
+            ],
+            "improvement_goal": "Make these into complete study notes"
         }
     }

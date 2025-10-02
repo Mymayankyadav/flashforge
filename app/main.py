@@ -676,6 +676,7 @@ async def format_content_with_pdf(request: ContentFormatRequest):
         )
         
     except Exception as e:
+        print(str(e))
         return ContentFormatResponse(
             original_content=request.content,
             formatted_content=request.content,  # Return original as fallback

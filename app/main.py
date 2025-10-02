@@ -49,11 +49,11 @@ def generate_with_gemini_and_pdf(prompt: str, pdf_uri: str) -> str:
         
         # Generate content with PDF and prompt
         response = client.models.generate_content(
-            model='gemini-2.5-pro',
+            model='gemini-2.5-flash',
             contents=[pdf_part, prompt],
             config={
-                "temperature": 0.3,
-                "top_p": 0.8,
+                "temperature": 0.2,
+                "top_p": 0.7,
                 "top_k": 40
             }
         )

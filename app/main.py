@@ -12,11 +12,6 @@ client= genai.Client(vertexai=True,
                      project=os.getenv("GCP_PROJECT_ID"), 
                      location = os.getenv("GCP_REGION")
                 )
-
-for m in client.models.list():
-    for action in m.supported_actions:
-        if action == "generateContent":
-            print(m.name)
           
 # Pydantic models for request/response bodies
 class Flashcard(BaseModel):

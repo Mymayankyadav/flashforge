@@ -36,7 +36,7 @@ class RefineFlashcardResponse(BaseModel):
     status: str = "success"
 
 # Utility function to call the Gemini model with PDF URI
-def generate_with_gemini_and_pdf(prompt: str, pdf_uri: str) -> str:
+def generate_with_gemini_and_pdf(prompt: str, pdf_uri: str, model:str="gemini-flash-latest") -> str:
     """
     Sends a prompt and PDF URI to the Gemini model and returns the response
     """
@@ -49,7 +49,7 @@ def generate_with_gemini_and_pdf(prompt: str, pdf_uri: str) -> str:
         
         # Generate content with PDF and prompt
         response = client.models.generate_content(
-            model='gemini-flash-latest',
+            model=model,
             contents=[pdf_part, prompt],
             config={
                 "temperature": 0.2,
@@ -340,7 +340,7 @@ async def generate_topic_tree(request: GenerateTopicTreeRequest):
         """
         
         # Get model response with PDF URI
-        model_output = generate_with_gemini_and_pdf(topic_tree_prompt, str(request.pdf_uri))
+        model_output = generate_with_gemini_and_pdf(topic_tree_prompt, str(request.pdf_uri),model="gemini-pro-latest")
         
         # Parse the JSON response
         try:

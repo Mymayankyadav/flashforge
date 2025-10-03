@@ -60,6 +60,7 @@ def generate_with_gemini_and_pdf(prompt: str, pdf_uri: str, model:str="gemini-fl
         
         return response.text
     except Exception as e:
+        print(e)
         raise HTTPException(status_code=500, detail=f"Error calling Gemini API: {str(e)}")
 
 @app.post("/generate-flashcards/", response_model=FlashcardResponse)
@@ -340,7 +341,7 @@ async def generate_topic_tree(request: GenerateTopicTreeRequest):
         """
         
         # Get model response with PDF URI
-        model_output = generate_with_gemini_and_pdf(topic_tree_prompt, str(request.pdf_uri),model="gemini-pro-latest")
+        model_output = generate_with_gemini_and_pdf(topic_tree_prompt, str(request.pdf_uri),model="gemini-2.5-pro")
         
         # Parse the JSON response
         try:

@@ -49,7 +49,7 @@ def generate_with_gemini_and_pdf(prompt: str, pdf_uri: str) -> str:
         
         # Generate content with PDF and prompt
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-flash-latest',
             contents=[pdf_part, prompt],
             config={
                 "temperature": 0.2,
@@ -641,7 +641,7 @@ def enhance_math_formatting_with_pdf(content: str, pdf_uri: str) -> str:
         )
         
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-flash-latest",
             contents=[pdf_part, prompt],
             config={
                 "temperature": 0.3,

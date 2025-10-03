@@ -12,6 +12,12 @@ client= genai.Client(vertexai=True,
                      project=os.getenv("GCP_PROJECT_ID"), 
                      location = os.getenv("GCP_REGION")
                 )
+
+for m in client.models.list():
+    for action in m.supported_actions:
+        if action == "generateContent":
+            print(m.name)
+          
 # Pydantic models for request/response bodies
 class Flashcard(BaseModel):
     front: str
@@ -36,7 +42,7 @@ class RefineFlashcardResponse(BaseModel):
     status: str = "success"
 
 # Utility function to call the Gemini model with PDF URI
-def generate_with_gemini_and_pdf(prompt: str, pdf_uri: str, model:str="gemini-flash-latest") -> str:
+def generate_with_gemini_and_pdf(prompt: str, pdf_uri: str, model:str="gemini-2.5-flash") -> str:
     """
     Sends a prompt and PDF URI to the Gemini model and returns the response
     """
@@ -642,7 +648,7 @@ def enhance_math_formatting_with_pdf(content: str, pdf_uri: str) -> str:
         )
         
         response = client.models.generate_content(
-            model="gemini-flash-latest",
+            model="gemini-2.5-flash",
             contents=[pdf_part, prompt],
             config={
                 "temperature": 0.3,

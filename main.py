@@ -660,6 +660,250 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Custom flashcard generation failed: {str(e)}")
+class RefineFlashcardRequest(BaseModel):
+    pdf_url: HttpUrl
+    source_pages: List[int]
+    incomplete_flashcard: str
+    current_topic: str = "General Topic"
+
+class RefineFlashcardResponse(BaseModel):
+    original_prompt: str
+    refined_flashcards: List[Flashcard]
+    source_pages: List[int]
+    interpretation: str
+
+@app.post("/refine-flashcard", response_model=RefineFlashcardResponse)
+async def refine_flashcard(request: RefineFlashcardRequest):
+    """
+    Refine an incomplete flashcard by understanding user intent using the PDF context
+    """
+    try:
+        # Download PDF from URL
+        pdf_bytes = download_pdf_from_url(str(request.pdf_url))
+        
+        # Split PDF for the specified source pages
+        split_pdf_bytes = split_pdf_by_pages(pdf_bytes, request.source_pages)
+        
+        # Enhanced prompt for understanding user intent and refining flashcards
+        prompt = f"""
+        USER'S INCOMPLETE FLASHCARD PROMPT: "{request.incomplete_flashcard}"
+        TOPIC CONTEXT: {request.current_topic}
+        
+        IMPORTANT PAGE NUMBERING:
+        - The provided PDF contains pages {request.source_pages} from the original document.
+        - When citing source pages, ALWAYS use the original PDF page numbers: {request.source_pages}
+        
+        TASK:
+        1. Analyze the user's incomplete flashcard prompt and understand what they're trying to learn/create
+        2. Use the PDF content to generate complete, well-structured flashcards that fulfill their intent
+        3. Provide multiple flashcards if the prompt suggests multiple concepts
+        
+        INTERPRETATION GUIDELINES:
+        - If the prompt is vague, expand it into clear educational objectives
+        - If the prompt is specific but incomplete, complete the thought
+        - If the prompt suggests multiple concepts, break it into multiple flashcards
+        - Focus on the key learning objectives from the PDF pages
+        
+        FORMATTING REQUIREMENTS:
+        - Use **Markdown** for text formatting
+        - Use LaTeX math: $equation$ for inline and $$equation$$ for block math
+        - Use code blocks for programming concepts
+        - Escape LaTeX backslashes with double backslashes
+        
+        OUTPUT STRUCTURE:
+        - Provide a brief interpretation of what the user was trying to achieve
+        - Generate 1-5 flashcards that fulfill their learning intent
+        - Each flashcard must have front, back, and source_pages
+        
+        Return your response as valid JSON with this exact structure:
+        {{
+            "interpretation": "Brief explanation of what the user was trying to achieve",
+            "flashcards": [
+                {{
+                    "front": "Complete front of flashcard with formatting",
+                    "back": "Complete back of flashcard with detailed explanation",
+                    "source_pages": [1, 2]
+                }}
+            ]
+        }}
+        """
+        
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=[
+                types.Part.from_bytes(
+                    data=split_pdf_bytes,
+                    mime_type='application/pdf'
+                ),
+                prompt
+            ],
+            config={
+                "temperature": 0.7,
+                "max_output_tokens": 4000,
+                "response_mime_type": "application/json",
+            }
+        )
+        
+        # Parse the response
+        try:
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.startswith('```'):
+                response_text = response_text[3:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
+                
+            refinement_data = parse_json_with_latex(response_text)
+            
+            # Map AI page references back to original PDF pages
+            flashcards_data = refinement_data.get("flashcards", [])
+            for flashcard_data in flashcards_data:
+                ai_source_pages = flashcard_data.get("source_pages", [])
+                flashcard_data["source_pages"] = map_ai_page_references(ai_source_pages, request.source_pages)
+            
+            flashcards = [Flashcard(**card) for card in flashcards_data]
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to parse refined flashcards from AI response: {str(e)}\nResponse: {response.text}"
+            )
+        
+        return RefineFlashcardResponse(
+            original_prompt=request.incomplete_flashcard,
+            refined_flashcards=flashcards,
+            source_pages=request.source_pages,
+            interpretation=refinement_data.get("interpretation", "Interpretation not provided")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Flashcard refinement failed: {str(e)}")
+
+class FormatImprovementRequest(BaseModel):
+    pdf_url: HttpUrl
+    source_pages: List[int]
+    text_to_format: str
+    target_language: str = "mathematics"  # mathematics, programming, physics, general
+
+class FormatImprovementResponse(BaseModel):
+    original_text: str
+    formatted_text: str
+    improvements_made: List[str]
+    source_pages: List[int]
+
+@app.post("/improve-formatting", response_model=FormatImprovementResponse)
+async def improve_formatting(request: FormatImprovementRequest):
+    """
+    Improve text formatting by converting to proper LaTeX and Markdown using PDF context
+    """
+    try:
+        # Download PDF from URL
+        pdf_bytes = download_pdf_from_url(str(request.pdf_url))
+        
+        # Split PDF for the specified source pages
+        split_pdf_bytes = split_pdf_by_pages(pdf_bytes, request.source_pages)
+        
+        # Prompt for intelligent formatting improvement
+        prompt = f"""
+        TEXT TO FORMAT: "{request.text_to_format}"
+        TARGET DOMAIN: {request.target_language}
+        
+        IMPORTANT PAGE NUMBERING:
+        - The provided PDF contains pages {request.source_pages} from the original document.
+        
+        TASK:
+        Analyze the provided text and improve its formatting by converting it to proper LaTeX and Markdown.
+        Use the PDF content as context to understand the domain and appropriate formatting rules.
+        
+        FORMATTING RULES:
+        
+        MATHEMATICS:
+        - Variables: x, y, z → $x$, $y$, $z$
+        - Sets: for i in V → for $i \\in V$
+        - Functions: f(x) → $f(x)$
+        - Equations: x = y + z → $x = y + z$
+        - Fractions: 1/2 → $\\frac{1}{2}$
+        - Greek letters: alpha, beta → $\\alpha$, $\\beta$
+        - Operators: sum, product → $\\sum$, $\\prod$
+        - Relations: <=, >=, != → $\\le$, $\\ge$, $\\neq$
+        
+        PROGRAMMING:
+        - Code blocks: Use ```language for multi-line code
+        - Inline code: Use `code` for short code snippets
+        - Keywords: bold important programming concepts
+        
+        GENERAL:
+        - **Bold** for important terms
+        - *Italics* for emphasis
+        - Lists with - or * for bullet points
+        - Headers with ## for sections
+        
+        IMPROVEMENT STRATEGY:
+        1. Identify mathematical expressions and convert to LaTeX
+        2. Identify code and format appropriately
+        3. Add Markdown formatting for readability
+        4. Maintain the original meaning while improving clarity
+        5. Use context from the PDF to determine the correct domain-specific formatting
+        
+        Return your response as valid JSON with this exact structure:
+        {{
+            "formatted_text": "The fully formatted text with LaTeX and Markdown",
+            "improvements_made": [
+                "Converted variables to LaTeX",
+                "Added code formatting",
+                "Applied Markdown structure"
+            ]
+        }}
+        """
+        
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=[
+                types.Part.from_bytes(
+                    data=split_pdf_bytes,
+                    mime_type='application/pdf'
+                ),
+                prompt
+            ],
+            config={
+                "temperature": 0.3,
+                "max_output_tokens": 3000,
+                "response_mime_type": "application/json",
+            }
+        )
+        
+        # Parse the response
+        try:
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.startswith('```'):
+                response_text = response_text[3:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
+                
+            formatting_data = parse_json_with_latex(response_text)
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to parse formatting improvement from AI response: {str(e)}\nResponse: {response.text}"
+            )
+        
+        return FormatImprovementResponse(
+            original_text=request.text_to_format,
+            formatted_text=formatting_data.get("formatted_text", request.text_to_format),
+            improvements_made=formatting_data.get("improvements_made", []),
+            source_pages=request.source_pages
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Formatting improvement failed: {str(e)}")
 
 @app.get("/")
 async def root():

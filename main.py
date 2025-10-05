@@ -729,7 +729,7 @@ async def refine_flashcard(request: RefineFlashcardRequest):
         """
         
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,
@@ -860,7 +860,7 @@ async def improve_formatting(request: FormatImprovementRequest):
         """
         
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,

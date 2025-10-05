@@ -289,6 +289,7 @@ async def generate_topic_tree(request: TopicTreeRequest):
         - Description: 1-2 sentence explanation of the topic content
         - Source pages: List of original page numbers where this topic appears (from {request.pages})
         - Subtopic: Nested sub-topics for deeper hierarchy
+        - Make sure that topic is covered in the pdf with some details not just casually mentioned
         
         Create a structured, organized topic tree that captures the main ideas and their relationships.
         
@@ -321,7 +322,7 @@ async def generate_topic_tree(request: TopicTreeRequest):
                 prompt
             ],
             config={
-                "temperature": 0.3
+                "temperature": 0.2
             }
         )
         

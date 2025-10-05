@@ -13,8 +13,10 @@ import tempfile
 app = FastAPI(title="PDF Analysis API", description="Extract topic trees and generate flashcards from PDF URLs")
 
 # Initialize Gemini client
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
+client= genai.Client(vertexai=True, 
+                     project=os.getenv("GCP_PROJECT_ID"), 
+                     location = os.getenv("GCP_REGION")
+                )
 # Pydantic Models
 class TopicNode(BaseModel):
     title: str

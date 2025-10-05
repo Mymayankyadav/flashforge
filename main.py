@@ -44,6 +44,8 @@ class FlashcardRequest(BaseModel):
     topic_title: str
     topic_description: str
     source_pages: List[int]
+    input_prompt: str
+    max_cards: int=5
 
 class FlashcardResponse(BaseModel):
     topic_title: str
@@ -369,6 +371,7 @@ async def generate_flashcards(request: FlashcardRequest):
         prompt = f"""
         Based on the PDF content about "{request.topic_title}" - {request.topic_description}, 
         generate a list of educational flashcards.
+        this the is the user request: {request.input_prompt} make sure you keep this request in mind. 
         
         IMPORTANT PAGE NUMBERING:
         - The provided PDF contains pages {request.source_pages} from the original document.
@@ -397,8 +400,10 @@ async def generate_flashcards(request: FlashcardRequest):
         - Important facts and details
         - Conceptual relationships
         - Practical applications
+        - Term and its definition
+        - Theroem and its proof
         
-        The number of flashcards should be automatically determined based on the content density and importance.
+        The number of flashcards should be automatically determined based on the content density and importance, with maximum numbers of flashcards: {request.max_cards}.
         
         Return your response as a valid JSON array of flashcard objects with this exact structure:
         [

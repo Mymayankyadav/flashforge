@@ -262,7 +262,14 @@ async def generate_flashcards(request: FlashcardRequest):
         - Important facts and details
         - Conceptual relationships
         - Practical applications
-        
+        - Theorem and a proof 
+
+        IMPORTANT FORMATTING INSTRUCTIONS:
+        - Use **Markdown** for formatting text (bold, italics, lists, headers)
+        - Use LaTeX math formatting for mathematical expressions: $equation$ for inline and $$equation$$ for block math
+        - Use code blocks for programming concepts
+        - Create clear, well-structured flashcards
+                                   
         The number of flashcards should be automatically determined based on the content density and importance.
         
         Return your response as a valid JSON array of flashcard objects with this exact structure:

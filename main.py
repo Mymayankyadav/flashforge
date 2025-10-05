@@ -402,6 +402,108 @@ async def generate_flashcards_from_leaves(request: LeafFlashcardRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Leaf flashcard generation failed: {str(e)}")
+        
+class CustomFlashcardRequest(BaseModel):
+    pdf_url: HttpUrl
+    source_pages: List[int]
+    custom_prompt: str
+    topic_title: str = "Custom Flashcards"
+    topic_description: str = "Generated from custom prompt"
+
+class CustomFlashcardResponse(BaseModel):
+    topic_title: str
+    topic_description: str
+    custom_prompt: str
+    flashcards: List[Flashcard]
+    source_pages: List[int]
+
+@app.post("/generate-custom-flashcards", response_model=CustomFlashcardResponse)
+async def generate_custom_flashcards(request: CustomFlashcardRequest):
+    """
+    Generate flashcards using a custom prompt with LaTeX and Markdown formatting support
+    """
+    try:
+        # Download PDF from URL
+        pdf_bytes = download_pdf_from_url(str(request.pdf_url))
+        
+        # Split PDF for the specified source pages
+        split_pdf_bytes = split_pdf_by_pages(pdf_bytes, request.source_pages)
+        
+        # Enhanced prompt with formatting instructions
+        enhanced_prompt = f"""
+        CUSTOM PROMPT: {request.custom_prompt}
+        
+        IMPORTANT FORMATTING INSTRUCTIONS:
+        - Use **Markdown** for formatting text (bold, italics, lists, headers)
+        - Use LaTeX math formatting for mathematical expressions: $equation$ for inline and $$equation$$ for block math
+        - Use code blocks for programming concepts
+        - Create clear, well-structured flashcards
+        
+        For each flashcard, provide:
+        - Front: Question, concept, or term (formatted with Markdown/LaTeX)
+        - Back: Detailed explanation with proper formatting
+        - Source pages: Specific page numbers from {request.source_pages}
+        
+        Return your response as a valid JSON array of flashcard objects with this exact structure:
+        [
+            {{
+                "front": "**Concept Name** with $mathematical$ notation",
+                "back": "Detailed explanation with:\n- Bullet points\n- **Bold text**\n- $E = mc^2$\n- ```code blocks```",
+                "source_pages": [1, 2]
+            }}
+        ]
+        
+        Ensure all mathematical expressions are properly formatted with LaTeX and text uses Markdown for clarity.
+        """
+        
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=[
+                types.Part.from_bytes(
+                    data=split_pdf_bytes,
+                    mime_type='application/pdf'
+                ),
+                enhanced_prompt
+            ],
+            config={
+                "temperature": 0.7,
+                "max_output_tokens": 4000,
+                "response_mime_type": "application/json",
+            }
+        )
+        
+        # Parse flashcards from response
+        try:
+            response_text = response.text.strip()
+            # Clean response text
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.startswith('```'):
+                response_text = response_text[3:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
+                
+            flashcards_data = json.loads(response_text)
+            flashcards = [Flashcard(**card) for card in flashcards_data]
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to parse custom flashcards from AI response: {str(e)}\nResponse: {response.text}"
+            )
+        
+        return CustomFlashcardResponse(
+            topic_title=request.topic_title,
+            topic_description=request.topic_description,
+            custom_prompt=request.custom_prompt,
+            flashcards=flashcards,
+            source_pages=request.source_pages
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Custom flashcard generation failed: {str(e)}")
 
 @app.get("/")
 async def root():

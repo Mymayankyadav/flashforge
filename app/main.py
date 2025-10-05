@@ -1,720 +1,410 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
+from typing import List, Optional
+import requests
+import PyPDF2
+import io
 from google import genai
-from google.genai.types import Part
+from google.genai import types
 import os
 import json
-from typing import List, Optional, Dict, Any
+import tempfile
 
-# Initialize the clients
-app = FastAPI(title="Flashcard Generator API")
-client= genai.Client(vertexai=True, 
-                     project=os.getenv("GCP_PROJECT_ID"), 
-                     location = os.getenv("GCP_REGION")
-                )
-          
-# Pydantic models for request/response bodies
+app = FastAPI(title="PDF Analysis API", description="Extract topic trees and generate flashcards from PDF URLs")
+
+# Initialize Gemini client
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Pydantic Models
+class TopicNode(BaseModel):
+    title: str
+    description: str
+    start_page: int
+    end_page: int
+    subtopics: List["TopicNode"] = []
+
+class TopicTreeRequest(BaseModel):
+    pdf_url: HttpUrl
+    pages: List[int]
+    max_depth: int = 3
+
+class TopicTreeResponse(BaseModel):
+    topics: List[TopicNode]
+    total_pages_processed: int
+
 class Flashcard(BaseModel):
     front: str
     back: str
+    source_pages: List[int]
 
-class GenerateFlashcardsRequest(BaseModel):
-    prompt: str
-    pdf_uri: HttpUrl  # URL to the PDF file
-    num_flashcards: Optional[int] = 5
-
-class RefinementRequest(BaseModel):
-    chat_history: List[dict]
-    prompt: str
-    pdf_uri: HttpUrl  # URL to the PDF file
+class FlashcardRequest(BaseModel):
+    pdf_url: HttpUrl
+    topic_title: str
+    topic_description: str
+    start_page: int
+    end_page: int
 
 class FlashcardResponse(BaseModel):
+    topic_title: str
+    topic_description: str
     flashcards: List[Flashcard]
-    status: str = "success"
 
-class RefineFlashcardResponse(BaseModel):
-    flashcard: Flashcard
-    status: str = "success"
+class LeafFlashcardRequest(BaseModel):
+    pdf_url: HttpUrl
+    topic_tree: TopicTreeResponse
 
-# Utility function to call the Gemini model with PDF URI
-def generate_with_gemini_and_pdf(prompt: str, pdf_uri: str, model:str="gemini-2.5-flash") -> str:
+class LeafFlashcardResponse(BaseModel):
+    leaf_nodes: List[FlashcardResponse]
+
+# Utility Functions
+def download_pdf_from_url(pdf_url: str) -> bytes:
     """
-    Sends a prompt and PDF URI to the Gemini model and returns the response
+    Download PDF from HTTPS URL and return as bytes
     """
     try:
-        # Create file part from PDF URI
-        pdf_part = Part.from_uri(
-            file_uri=pdf_uri,
-            mime_type="application/pdf"
-        )
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(pdf_url, headers=headers, timeout=30)
+        response.raise_for_status()
         
-        # Generate content with PDF and prompt
+        # Verify it's a PDF
+        content_type = response.headers.get('content-type', '').lower()
+        if 'pdf' not in content_type:
+            # Check first few bytes for PDF signature
+            if not response.content.startswith(b'%PDF'):
+                raise HTTPException(status_code=400, detail="URL does not point to a valid PDF file")
+        
+        return response.content
+        
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=400, detail=f"Failed to download PDF from URL: {str(e)}")
+
+def split_pdf_by_pages(pdf_bytes: bytes, target_pages: List[int]) -> bytes:
+    """
+    Split PDF to keep only specified pages and return as bytes
+    Pages are 1-indexed in API, 0-indexed internally
+    """
+    try:
+        pdf_file = io.BytesIO(pdf_bytes)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        
+        total_pages = len(pdf_reader.pages)
+        
+        # Validate page numbers (convert to 0-indexed for processing)
+        valid_pages = []
+        for page_num in target_pages:
+            if 1 <= page_num <= total_pages:
+                valid_pages.append(page_num - 1)  # Convert to 0-indexed
+            else:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Page {page_num} is out of range. PDF has {total_pages} pages."
+                )
+        
+        if not valid_pages:
+            raise HTTPException(status_code=400, detail="No valid pages found in PDF")
+        
+        pdf_writer = PyPDF2.PdfWriter()
+        
+        for page_idx in valid_pages:
+            pdf_writer.add_page(pdf_reader.pages[page_idx])
+        
+        # Create new PDF in memory
+        output_buffer = io.BytesIO()
+        pdf_writer.write(output_buffer)
+        output_buffer.seek(0)
+        
+        return output_buffer.getvalue()
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF splitting failed: {str(e)}")
+
+def find_leaf_nodes(topic_tree: List[TopicNode]) -> List[TopicNode]:
+    """
+    Recursively find all leaf nodes (nodes with no subtopics)
+    """
+    leaf_nodes = []
+    
+    def _traverse(node: TopicNode):
+        if not node.subtopics:
+            leaf_nodes.append(node)
+        else:
+            for child in node.subtopics:
+                _traverse(child)
+    
+    for node in topic_tree:
+        _traverse(node)
+        
+    return leaf_nodes
+
+# API Endpoints
+@app.post("/generate-topic-tree", response_model=TopicTreeResponse)
+async def generate_topic_tree(request: TopicTreeRequest):
+    """
+    Generate a hierarchical topic tree from specified PDF pages using Gemini
+    """
+    try:
+        # Download PDF from URL
+        pdf_bytes = download_pdf_from_url(str(request.pdf_url))
+        
+        # Split PDF to keep only specified pages
+        split_pdf_bytes = split_pdf_by_pages(pdf_bytes, request.pages)
+        
+        # Generate topic tree using Gemini with PDF bytes
+        prompt = f"""
+        Analyze the PDF content and generate a hierarchical topic tree with up to {request.max_depth} levels of depth.
+        
+        For each topic, provide:
+        - Title: Clear, descriptive topic name
+        - Description: 1-2 sentence explanation of the topic content
+        - Start page: First page where this topic appears (using 1-indexed page numbers as in the original PDF)
+        - End page: Last page where this topic appears
+        - Subtopic: Nested sub-topics for deeper hierarchy
+        
+        The provided PDF contains pages {request.pages} from the original document. 
+        Create a structured, organized topic tree that captures the main ideas and their relationships.
+        
+        Return your response as a valid JSON array of topic objects with this exact structure:
+        [
+            {{
+                "title": "Topic Name",
+                "description": "Topic description",
+                "start_page": 1,
+                "end_page": 3,
+                "subtopics": [
+                    {{
+                        "title": "Subtopic Name",
+                        "description": "Subtopic description", 
+                        "start_page": 2,
+                        "end_page": 3,
+                        "subtopics": []
+                    }}
+                ]
+            }}
+        ]
+        """
+        
+        # Use Gemini to analyze the PDF bytes directly
         response = client.models.generate_content(
-            model=model,
-            contents=[pdf_part, prompt],
+            model="gemini-2.0-flash-exp",
+            contents=[
+                types.Part.from_bytes(
+                    data=split_pdf_bytes,
+                    mime_type='application/pdf'
+                ),
+                prompt
+            ],
             config={
-                "temperature": 0.2,
-                "top_p": 0.7,
-                "top_k": 40
+                "temperature": 0.3,
+                "max_output_tokens": 4000,
             }
         )
         
-        return response.text
+        # Parse the response
+        try:
+            # Extract JSON from response (handle potential markdown code blocks)
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]  # Remove ```json
+            if response_text.startswith('```'):
+                response_text = response_text[3:]  # Remove ```
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]  # Remove closing ```
+                
+            topics_data = json.loads(response_text)
+            topics = [TopicNode(**topic) for topic in topics_data]
+        except (json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to parse AI response as JSON: {str(e)}\nResponse: {response.text}"
+            )
+        
+        return TopicTreeResponse(
+            topics=topics,
+            total_pages_processed=len(request.pages)
+        )
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        print(e)
-        raise HTTPException(status_code=500, detail=f"Error calling Gemini API: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Topic tree generation failed: {str(e)}")
 
-@app.post("/generate-flashcards/", response_model=FlashcardResponse)
-async def generate_flashcards(request: GenerateFlashcardsRequest):
+@app.post("/generate-flashcards", response_model=FlashcardResponse)
+async def generate_flashcards(request: FlashcardRequest):
     """
-    Generates a list of flashcards from a given prompt and PDF URI using Gemini's native PDF support
+    Generate flashcards from a specific topic using its page range
     """
     try:
-        # Construct the enhanced prompt for flashcard generation with JSON format requirement
-        flashcard_system_prompt = f"""
-        You are a helpful assistant that creates educational flashcards.
-        Based on the content of the provided PDF, create {request.num_flashcards} flashcards according to this instruction: {request.prompt}
+        # Download PDF from URL
+        pdf_bytes = download_pdf_from_url(str(request.pdf_url))
         
-        REQUIREMENTS:
-        1. Each flashcard must have a 'front' (question, term, or concept) and a 'back' (answer, definition, or explanation)
-        2. Format both front and back using Markdown for better readability
-        3. For mathematical expressions, use LaTeX within $..$ symbols (e.g., $E = mc^2$) or \[..\] for display mode
-        4. Create comprehensive flashcards that cover key concepts from the PDF
-        5. Return ONLY a valid JSON array without any additional text or markdown formatting
-        6. Ensure flashcards are accurate and based solely on the PDF content
+        # Create page range for the topic
+        page_range = list(range(request.start_page, request.end_page + 1))
         
-        JSON FORMAT:
+        # Split PDF for the specific topic page range
+        split_pdf_bytes = split_pdf_by_pages(pdf_bytes, page_range)
+        
+        # Generate flashcards using Gemini
+        prompt = f"""
+        Based on the PDF content about "{request.topic_title}" - {request.topic_description}, 
+        generate a list of educational flashcards.
+        
+        For each flashcard, provide:
+        - Front: A clear question, term, or concept prompt
+        - Back: A detailed explanation, definition, or answer
+        - Source pages: The specific page numbers where this information appears (from pages {page_range})
+        
+        Create flashcards that cover:
+        - Key concepts and definitions
+        - Important facts and details
+        - Conceptual relationships
+        - Practical applications
+        
+        The number of flashcards should be automatically determined based on the content density and importance.
+        
+        Return your response as a valid JSON array of flashcard objects with this exact structure:
         [
-            {{"front": "Front content 1", "back": "Back content 1"}},
-            {{"front": "Front content 2", "back": "Back content 2"}}
+            {{
+                "front": "Question or concept",
+                "back": "Detailed answer or explanation",
+                "source_pages": [1, 2]
+            }}
         ]
-        
-        Ensure the response is parseable JSON and contains exactly {request.num_flashcards} flashcards.
         """
         
-        # Get model response with PDF URI
-        model_output = generate_with_gemini_and_pdf(flashcard_system_prompt, str(request.pdf_uri))
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=[
+                types.Part.from_bytes(
+                    data=split_pdf_bytes,
+                    mime_type='application/pdf'
+                ),
+                prompt
+            ],
+            config={
+                "temperature": 0.7,
+                "max_output_tokens": 3000,
+            }
+        )
         
-        # Parse the JSON response
+        # Parse flashcards from response
         try:
-            # Clean the response - remove any markdown code blocks
-            cleaned_output = model_output.strip()
-            if cleaned_output.startswith("```json"):
-                cleaned_output = cleaned_output[7:]
-            if cleaned_output.endswith("```"):
-                cleaned_output = cleaned_output[:-3]
-            cleaned_output = cleaned_output.strip()
-            
-            # Parse JSON
-            flashcards_data = json.loads(cleaned_output)
-            
-            # Validate and create Flashcard objects
-            flashcards = []
-            for item in flashcards_data:
-                if isinstance(item, dict) and 'front' in item and 'back' in item:
-                    flashcards.append(Flashcard(
-                        front=item['front'].strip(),
-                        back=item['back'].strip()
-                    ))
-            
-            if not flashcards:
-                raise HTTPException(status_code=500, detail="No valid flashcards generated")
-            
-            # Limit to requested number
-            flashcards = flashcards[:request.num_flashcards]
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.startswith('```'):
+                response_text = response_text[3:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
                 
-            return FlashcardResponse(flashcards=flashcards)
-            
-        except json.JSONDecodeError as e:
-            # If JSON parsing fails, try to extract JSON from the response
-            import re
-            json_match = re.search(r'\[.*\]', cleaned_output, re.DOTALL)
-            if json_match:
-                try:
-                    flashcards_data = json.loads(json_match.group())
-                    flashcards = []
-                    for item in flashcards_data:
-                        if isinstance(item, dict) and 'front' in item and 'back' in item:
-                            flashcards.append(Flashcard(
-                                front=item['front'].strip(),
-                                back=item['back'].strip()
-                            ))
-                    if flashcards:
-                        return FlashcardResponse(flashcards=flashcards[:request.num_flashcards])
-                except:
-                    pass
-            
+            flashcards_data = json.loads(response_text)
+            flashcards = [Flashcard(**card) for card in flashcards_data]
+        except (json.JSONDecodeError, KeyError) as e:
             raise HTTPException(
                 status_code=500, 
-                detail=f"Failed to parse model response as JSON: {str(e)}\nModel output: {model_output}"
+                detail=f"Failed to parse flashcards from AI response: {str(e)}\nResponse: {response.text}"
             )
-    
+        
+        return FlashcardResponse(
+            topic_title=request.topic_title,
+            topic_description=request.topic_description,
+            flashcards=flashcards
+        )
+        
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Flashcard generation failed: {str(e)}")
 
-@app.post("/refine-flashcard/", response_model=RefineFlashcardResponse)
-async def refine_flashcard(request: RefinementRequest):
+@app.post("/generate-flashcards-from-leaves", response_model=LeafFlashcardResponse)
+async def generate_flashcards_from_leaves(request: LeafFlashcardRequest):
     """
-    Refines a specific flashcard based on chat history and the PDF context
+    Generate flashcards for all leaf nodes in a topic tree
     """
     try:
-        # Construct chat history context
-        chat_context = "\n".join([
-            f"{msg.get('role', 'user')}: {msg.get('content', '')}" 
-            for msg in request.chat_history[-10:]  # Limit to last 10 messages
-        ])
+        # Download PDF from URL once
+        pdf_bytes = download_pdf_from_url(str(request.pdf_url))
         
-        # Construct refinement prompt
-        refinement_prompt = f"""
-        You are a helpful assistant that refines educational flashcards based on chat history and PDF content.
+        # Find all leaf nodes
+        leaf_nodes = find_leaf_nodes(request.topic_tree.topics)
         
-        CHAT HISTORY:
-        {chat_context}
+        if not leaf_nodes:
+            raise HTTPException(status_code=400, detail="No leaf nodes found in the topic tree")
         
-        REFINEMENT REQUEST:
-        {request.prompt}
+        results = []
         
-        Based on the PDF content and the conversation history above, refine the flashcard.
-        
-        REQUIREMENTS:
-        1. Return a SINGLE JSON object with 'front' and 'back' keys
-        2. Use Markdown formatting in both front and back
-        3. For mathematical expressions, use LaTeX within $..$ symbols or \[..\] for display mode
-        4. Make the flashcard more accurate, comprehensive, and educational based on the PDF content
-        5. Return ONLY the JSON object without any additional text
-        
-        JSON FORMAT:
-        {{"front": "Refined front content", "back": "Refined back content"}}
-        """
-        
-        # Get model response
-        model_output = generate_with_gemini_and_pdf(refinement_prompt, str(request.pdf_uri))
-        print(request)
-        # Parse the JSON response
-        try:
-            # Clean the response
-            cleaned_output = model_output.strip()
-            if cleaned_output.startswith("```json"):
-                cleaned_output = cleaned_output[7:]
-            if cleaned_output.endswith("```"):
-                cleaned_output = cleaned_output[:-3]
-            cleaned_output = cleaned_output.strip()
-            
-            # Parse JSON
-            flashcard_data = json.loads(cleaned_output)
-            
-            if isinstance(flashcard_data, dict) and 'front' in flashcard_data and 'back' in flashcard_data:
-                print(flashcard_data)
-                return RefineFlashcardResponse(
-                    flashcard=Flashcard(
-                        front=flashcard_data['front'].strip(),
-                        back=flashcard_data['back'].strip()
-                    )
-                )
-            else:
-                raise HTTPException(status_code=500, detail="Invalid flashcard format in response")
-                
-        except json.JSONDecodeError as e:
-            # Try to extract JSON object from response
-            import re
-            json_match = re.search(r'\{.*\}', cleaned_output, re.DOTALL)
-            if json_match:
-                try:
-                    flashcard_data = json.loads(json_match.group())
-                    if isinstance(flashcard_data, dict) and 'front' in flashcard_data and 'back' in flashcard_data:
-                        return RefineFlashcardResponse(
-                            flashcard=Flashcard(
-                                front=flashcard_data['front'].strip(),
-                                back=flashcard_data['back'].strip()
-                            )
-                        )
-                except:
-                    pass
-            
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Failed to parse refinement response as JSON: {str(e)}\nModel output: {model_output}"
+        # Generate flashcards for each leaf node
+        for leaf in leaf_nodes:
+            flashcard_request = FlashcardRequest(
+                pdf_url=request.pdf_url,
+                topic_title=leaf.title,
+                topic_description=leaf.description,
+                start_page=leaf.start_page,
+                end_page=leaf.end_page
             )
-    
+            
+            # Use the internal PDF bytes we already downloaded
+            page_range = list(range(leaf.start_page, leaf.end_page + 1))
+            split_pdf_bytes = split_pdf_by_pages(pdf_bytes, page_range)
+            
+            # Generate flashcards (simplified version of the flashcard generation logic)
+            prompt = f"""
+            Generate educational flashcards for: {leaf.title} - {leaf.description}
+            
+            For each flashcard provide:
+            - Front: Question or concept
+            - Back: Detailed explanation  
+            - Source pages: Specific page numbers from {page_range}
+            
+            Return as JSON array of {{"front": "", "back": "", "source_pages": []}}
+            """
+            
+            response = client.models.generate_content(
+                model="gemini-2.0-flash-exp",
+                contents=[
+                    types.Part.from_bytes(
+                        data=split_pdf_bytes,
+                        mime_type='application/pdf'
+                    ),
+                    prompt
+                ],
+                config={"temperature": 0.7, "max_output_tokens": 3000}
+            )
+            
+            try:
+                response_text = response.text.strip()
+                if response_text.startswith('```json'):
+                    response_text = response_text[7:]
+                if response_text.startswith('```'):
+                    response_text = response_text[3:]
+                if response_text.endswith('```'):
+                    response_text = response_text[:-3]
+                    
+                flashcards_data = json.loads(response_text)
+                flashcards = [Flashcard(**card) for card in flashcards_data]
+                
+                results.append(FlashcardResponse(
+                    topic_title=leaf.title,
+                    topic_description=leaf.description,
+                    flashcards=flashcards
+                ))
+            except (json.JSONDecodeError, KeyError) as e:
+                # Continue with other leaf nodes even if one fails
+                print(f"Failed to parse flashcards for {leaf.title}: {str(e)}")
+                continue
+        
+        return LeafFlashcardResponse(leaf_nodes=results)
+        
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Leaf flashcard generation failed: {str(e)}")
 
 @app.get("/")
 async def root():
-    return {"message": "Flashcard Generator API with Gemini PDF URI Support"}
+    return {"message": "PDF Analysis API - Use /generate-topic-tree, /generate-flashcards, and /generate-flashcards-from-leaves endpoints"}
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "Flashcard Generator API"}
-
-# Example request models for documentation
-@app.get("/examples")
-async def get_examples():
-    return {
-        "generate_flashcards_example": {
-            "prompt": "Create flashcards about machine learning concepts",
-            "pdf_uri": "https://example.com/document.pdf",
-            "num_flashcards": 5
-        },
-        "refine_flashcard_example": {
-            "chat_history": [
-                {"role": "user", "content": "Make this flashcard more detailed"},
-                {"role": "assistant", "content": "Current flashcard content"}
-            ],
-            "prompt": "Add mathematical formulas to explain the concept better",
-            "pdf_uri": "https://example.com/document.pdf"
-        }
-    }
-
-
-class TopicNode(BaseModel):
-    topic: str
-    description: Optional[str] = None
-    page_reference: Optional[List[int]] = None
-    subtopics: Optional[List['TopicNode']] = None
-    depth: Optional[int] = 0
-
-# Make TopicNode forward reference work
-TopicNode.update_forward_refs()
-
-class TopicTreeResponse(BaseModel):
-    topic_tree: List[TopicNode]
-    total_topics: int
-    max_depth: int
-    status: str = "success"
-
-class GenerateTopicTreeRequest(BaseModel):
-    pdf_uri: HttpUrl
-    prompt: Optional[str] = "Break down this document into a hierarchical topic structure"
-    max_depth: Optional[int] = 4
-    include_page_references: Optional[bool] = True
-
-# ... (keep your existing utility functions and endpoints)
-
-@app.post("/generate-topic-tree/", response_model=TopicTreeResponse)
-async def generate_topic_tree(request: GenerateTopicTreeRequest):
-    """
-    Analyzes a PDF and breaks it down into a hierarchical topic tree structure
-    """
-    try:
-        # Construct the topic tree generation prompt
-        topic_tree_prompt = f"""
-        Analyze the provided PDF document and create a comprehensive hierarchical topic tree.
-        
-        USER REQUEST: {request.prompt}
-        
-        REQUIREMENTS:
-        1. Create a hierarchical topic tree with up to {request.max_depth} levels of depth
-        2. Each topic should have:
-           - A clear, concise topic name
-           - A brief description of what the topic covers
-           - Page references where the topic is discussed {f"(include page numbers)" if request.include_page_references else ""}
-        3. The structure should reflect the document's actual organization
-        4. Make the tree comprehensive but not overly detailed
-        5. Return ONLY valid JSON format - no additional text
-        
-        JSON FORMAT:
-        {{
-            "topics": [
-                {{
-                    "topic": "Main Topic 1",
-                    "description": "Brief description of main topic 1",
-                    "page_reference": [1, 2, 3],
-                    "subtopics": [
-                        {{
-                            "topic": "Subtopic 1.1",
-                            "description": "Description of subtopic 1.1",
-                            "page_reference": [2],
-                            "subtopics": [
-                                // More nested subtopics up to {request.max_depth} levels
-                            ]
-                        }}
-                    ]
-                }}
-            ]
-        }}
-        
-        Ensure the response is valid JSON and the structure makes educational sense.
-        """
-        
-        # Get model response with PDF URI
-        model_output = generate_with_gemini_and_pdf(topic_tree_prompt, str(request.pdf_uri),model="gemini-2.5-pro")
-        
-        # Parse the JSON response
-        try:
-            # Clean the response
-            cleaned_output = model_output.strip()
-            if cleaned_output.startswith("```json"):
-                cleaned_output = cleaned_output[7:]
-            if cleaned_output.endswith("```"):
-                cleaned_output = cleaned_output[:-3]
-            cleaned_output = cleaned_output.strip()
-            
-            # Parse JSON
-            tree_data = json.loads(cleaned_output)
-            
-            # Validate and create TopicNode objects
-            if 'topics' in tree_data and isinstance(tree_data['topics'], list):
-                topic_tree = []
-                total_topics = 0
-                max_depth = 0
-                
-                def build_topic_nodes(nodes, current_depth=1):
-                    nonlocal total_topics, max_depth
-                    topic_list = []
-                    
-                    for node in nodes:
-                        if isinstance(node, dict) and 'topic' in node:
-                            # Update max depth
-                            max_depth = max(max_depth, current_depth)
-                            total_topics += 1
-                            
-                            # Build subtopics recursively
-                            subtopics = []
-                            if 'subtopics' in node and isinstance(node['subtopics'], list):
-                                subtopics = build_topic_nodes(node['subtopics'], current_depth + 1)
-                            
-                            # Create TopicNode
-                            topic_node = TopicNode(
-                                topic=node['topic'].strip(),
-                                description=node.get('description', '').strip(),
-                                page_reference=node.get('page_reference', []),
-                                subtopics=subtopics,
-                                depth=current_depth
-                            )
-                            topic_list.append(topic_node)
-                    
-                    return topic_list
-                
-                topic_tree = build_topic_nodes(tree_data['topics'])
-                
-                if not topic_tree:
-                    raise HTTPException(status_code=500, detail="No valid topic tree generated")
-                
-                return TopicTreeResponse(
-                    topic_tree=topic_tree,
-                    total_topics=total_topics,
-                    max_depth=max_depth
-                )
-            else:
-                raise HTTPException(status_code=500, detail="Invalid topic tree format in response")
-                
-        except json.JSONDecodeError as e:
-            # Try to extract JSON from response
-            import re
-            json_match = re.search(r'\{.*\}', cleaned_output, re.DOTALL)
-            if json_match:
-                try:
-                    tree_data = json.loads(json_match.group())
-                    if 'topics' in tree_data:
-                        # Re-process with the extracted JSON
-                        topic_tree = []
-                        total_topics = 0
-                        max_depth = 0
-                        
-                        def build_topic_nodes(nodes, current_depth=1):
-                            nonlocal total_topics, max_depth
-                            topic_list = []
-                            
-                            for node in nodes:
-                                if isinstance(node, dict) and 'topic' in node:
-                                    max_depth = max(max_depth, current_depth)
-                                    total_topics += 1
-                                    
-                                    subtopics = []
-                                    if 'subtopics' in node and isinstance(node['subtopics'], list):
-                                        subtopics = build_topic_nodes(node['subtopics'], current_depth + 1)
-                                    
-                                    topic_node = TopicNode(
-                                        topic=node['topic'].strip(),
-                                        description=node.get('description', '').strip(),
-                                        page_reference=node.get('page_reference', []),
-                                        subtopics=subtopics,
-                                        depth=current_depth
-                                    )
-                                    topic_list.append(topic_node)
-                            
-                            return topic_list
-                        
-                        topic_tree = build_topic_nodes(tree_data['topics'])
-                        
-                        if topic_tree:
-                            return TopicTreeResponse(
-                                topic_tree=topic_tree,
-                                total_topics=total_topics,
-                                max_depth=max_depth
-                            )
-                except:
-                    pass
-            
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Failed to parse topic tree response as JSON: {str(e)}\nModel output: {model_output}"
-            )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error in topic tree generation: {str(e)}")
-
-# New Pydantic models for text improvement
-class TextImprovementRequest(BaseModel):
-    pdf_uri: HttpUrl
-    text: str
-    improvement_goal: Optional[str] = "Make this text more detailed, accurate, and well-formatted using the PDF content"
-    context_hint: Optional[str] = None  # Additional context about what user is trying to say
-    output_format: Optional[str] = "markdown"  # markdown, html, or plain_text
-
-class TextImprovementResponse(BaseModel):
-    original_text: str
-    improved_text: str
-    confidence_score: Optional[float] = None  # AI's confidence in understanding the intent
-    improvements_made: List[str]  # List of specific improvements
-    status: str = "success"
-
-#Enhanced text improvement endpoint with PDF context
-@app.post("/improve-text/", response_model=TextImprovementResponse)
-async def improve_text_with_pdf(request: TextImprovementRequest):
-    """
-    Takes vague, incomplete, or concise text and improves it using the PDF context.
-    The AI understands the user's intent and completes/expands the text appropriately.
-    """
-    try:
-        # Construct the improvement prompt with PDF context
-        improvement_prompt = f"""
-        You are an expert editor and content enhancer. The user has provided some text that may be:
-        - Vague or incomplete
-        - Missing context
-        - Too concise
-        - Lacking proper formatting
-        - Grammatically incorrect
-        
-        YOUR TASK:
-        Understand the user's intent from their text and improve it using the PDF document as reference.
-        
-        USER'S ORIGINAL TEXT: "{request.text}"
-        
-        IMPROVEMENT GOAL: {request.improvement_goal}
-        {f"CONTEXT HINT: {request.context_hint}" if request.context_hint else ""}
-        OUTPUT FORMAT: {request.output_format}
-        
-        REQUIREMENTS:
-        1. FIRST, analyze the PDF content to understand the context and subject matter
-        2. THEN, interpret what the user is trying to express in their original text
-        3. IMPROVE the text by:
-           - Completing incomplete thoughts
-           - Adding missing context from the PDF
-           - Correcting grammatical errors
-           - Expanding concise points with relevant details
-           - Adding proper formatting ({request.output_format.upper()} format)
-           - Including mathematical expressions in LaTeX ($...$) when needed
-        4. Maintain the original intent and core message
-        5. Make the text more professional, clear, and comprehensive
-        
-        IMPORTANT: 
-        - Use the PDF content to ensure accuracy and relevance
-        - If the original text mentions concepts from the PDF, expand on them using the PDF's information
-        - If the text is a question, provide a more complete and well-formed question
-        - If the text is a statement, make it more detailed and accurate
-        
-        RETURN FORMAT:
-        Provide a JSON object with:
-        {{
-            "improved_text": "The enhanced and completed text",
-            "confidence_score": 0.95,  # Your confidence in understanding user intent (0-1)
-            "improvements_made": [
-                "Completed incomplete sentence about X",
-                "Added mathematical notation",
-                "Expanded concept Y with details from PDF",
-                "Corrected grammar and structure"
-            ]
-        }}
-        
-        Return ONLY the JSON object, no additional text.
-        """
-        
-        # Get model response with PDF URI
-        model_output = generate_with_gemini_and_pdf(improvement_prompt, str(request.pdf_uri))
-        
-        # Parse the JSON response
-        try:
-            # Clean the response
-            cleaned_output = model_output.strip()
-            if cleaned_output.startswith("```json"):
-                cleaned_output = cleaned_output[7:]
-            if cleaned_output.endswith("```"):
-                cleaned_output = cleaned_output[:-3]
-            cleaned_output = cleaned_output.strip()
-            
-            # Parse JSON
-            improvement_data = json.loads(cleaned_output)
-            
-            # Validate response structure
-            if ('improved_text' in improvement_data and 
-                'confidence_score' in improvement_data and 
-                'improvements_made' in improvement_data):
-                
-                # Validate confidence score
-                confidence = improvement_data['confidence_score']
-                if not (0 <= confidence <= 1):
-                    confidence = 0.8  # Default confidence if invalid
-                
-                return TextImprovementResponse(
-                    original_text=request.text,
-                    improved_text=improvement_data['improved_text'].strip(),
-                    confidence_score=confidence,
-                    improvements_made=improvement_data['improvements_made'],
-                    status="success"
-                )
-            else:
-                raise HTTPException(status_code=500, detail="Invalid improvement response format")
-                
-        except json.JSONDecodeError as e:
-            # If JSON parsing fails, try to extract the improved text directly
-            # and create a basic response
-            improved_text = cleaned_output
-            if len(improved_text) > len(request.text) + 10:  # Basic check if improvement happened
-                return TextImprovementResponse(
-                    original_text=request.text,
-                    improved_text=improved_text,
-                    confidence_score=0.7,
-                    improvements_made=["Enhanced text content and formatting"],
-                    status="success"
-                )
-            else:
-                raise HTTPException(
-                    status_code=500, 
-                    detail=f"Failed to parse improvement response: {str(e)}\nModel output: {model_output}"
-                )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected error in text improvement: {str(e)}")
-
-# Enhanced version of your original format-content endpoint with PDF support
-class ContentFormatRequest(BaseModel):
-    content: str
-    pdf_uri: HttpUrl  # Added PDF URI for context
-    format_type: Optional[str] = "markdown"  # markdown, html, or latex
-
-class ContentFormatResponse(BaseModel):
-    original_content: str
-    formatted_content: str
-    improvements: List[str]
-    success: bool
-    error: Optional[str] = None
-
-def enhance_math_formatting_with_pdf(content: str, pdf_uri: str) -> str:
-    """Apply AI-powered math formatting using PDF context"""
-    prompt = f"""
-    Convert the following educational content to properly formatted markdown with LaTeX math mode.
-    Use the PDF document as reference to understand the context and ensure accuracy.
-    
-    CONTENT TO FORMAT: "{content}"
-    
-    FORMATTING RULES:
-    1. Wrap mathematical variables and expressions in $...$ for inline math mode
-    2. Use proper LaTeX commands: \\in, \\ldots, \\cdots, \\rightarrow, \\frac, etc.
-    3. Maintain the original meaning and structure
-    4. Correct grammar and improve clarity if needed
-    5. Use the PDF context to ensure mathematical symbols and concepts are accurate
-    6. Return only the full formatted markdown, no additional text or explanations
-    7. Don't cut any part of the original content
-    
-    Example transformation:
-    Input: "The following are equivalent: 1.The matrix of T with respect to v1,ldots,vn is upper triangular 2. span(v1,ldots,vn) is invariant under T for each k=1,ldots,n 3. Tvk in span(v1,ldots,vn)"
-    Output: "The following are equivalent:
-    1. The matrix of $T$ with respect to $v_1,\\ldots,v_n$ is upper triangular
-    2. $\\text{'span'}(v_1,\\ldots,v_n)$ is invariant under $T$ for each $k=1,\\ldots,n$
-    3. $Tv_k \\in \\text{'span'}(v_1,\\ldots,v_n)$"
-    
-    Now format this content using the PDF as reference:
-    """
-    
-    try:
-        pdf_part = Part.from_uri(
-            file_uri=pdf_uri,
-            mime_type="application/pdf"
-        )
-        
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[pdf_part, prompt],
-            config={
-                "temperature": 0.3,
-                "top_p": 0.8,
-                "top_k": 40
-            }
-        )
-        return response.text.strip()
-    except Exception as e:
-        raise Exception(f"AI formatting failed: {e}")
-
-@app.post("/format-content", response_model=ContentFormatResponse)
-async def format_content_with_pdf(request: ContentFormatRequest):
-    """Transform plain text content to formatted text with LaTeX math using PDF context"""
-    try:
-        formatted_content = enhance_math_formatting_with_pdf(request.content, str(request.pdf_uri))
-        
-        # Analyze what improvements were made
-        improvements = []
-        if len(formatted_content) > len(request.content):
-            improvements.append("Expanded and clarified content")
-        if "$" in formatted_content:
-            improvements.append("Added mathematical notation")
-        if "**" in formatted_content or "#" in formatted_content:
-            improvements.append("Added markdown formatting")
-        
-        return ContentFormatResponse(
-            original_content=request.content,
-            formatted_content=formatted_content,
-            improvements=improvements,
-            success=True
-        )
-        
-    except Exception as e:
-        print(str(e))
-        return ContentFormatResponse(
-            original_content=request.content,
-            formatted_content=request.content,  # Return original as fallback
-            improvements=[],
-            success=False,
-            error=str(e)
-        )
-
-
-# Update examples endpoint
-@app.get("/examples")
-async def get_examples():
-    return {
-        "generate_flashcards_example": {
-            "prompt": "Create flashcards about machine learning concepts",
-            "pdf_uri": "https://example.com/document.pdf",
-            "num_flashcards": 5
-        },
-        "improve_text_example": {
-            "pdf_uri": "https://example.com/math-textbook.pdf",
-            "text": "matrix upper triangular equivalent conditions",
-            "improvement_goal": "Expand this into a complete mathematical statement",
-            "context_hint": "This is about linear algebra and matrix properties"
-        },
-        "format_content_example": {
-            "content": "The derivative of f(x) = x^2 is 2x and the integral is x^3/3",
-            "pdf_uri": "https://example.com/calculus-textbook.pdf",
-            "format_type": "markdown"
-        },
-        "batch_improvement_example": {
-            "pdf_uri": "https://example.com/document.pdf",
-            "texts": [
-                "quantum mechanics basics",
-                "schrodinger equation important",
-                "wave function probability"
-            ],
-            "improvement_goal": "Make these into complete study notes"
-        }
-    }
+    return {"status": "healthy", "service": "PDF Analysis API"}

@@ -310,7 +310,7 @@ async def generate_topic_tree(request: TopicTreeRequest):
         
         # Use Gemini to analyze the PDF bytes directly
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,
@@ -411,7 +411,7 @@ async def generate_flashcards(request: FlashcardRequest):
         """
         
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,
@@ -421,7 +421,6 @@ async def generate_flashcards(request: FlashcardRequest):
             ],
             config={
                 "temperature": 0.7,
-                "max_output_tokens": 4000,
                 "response_mime_type": "application/json",
             }
         )
@@ -506,7 +505,7 @@ async def generate_flashcards_from_leaves(request: LeafFlashcardRequest):
             """
             
             response = client.models.generate_content(
-                model="gemini-2.0-flash-exp",
+                model="gemini-2.5-flash",
                 contents=[
                     types.Part.from_bytes(
                         data=split_pdf_bytes,
@@ -515,8 +514,7 @@ async def generate_flashcards_from_leaves(request: LeafFlashcardRequest):
                     prompt
                 ],
                 config={
-                    "temperature": 0.7, 
-                    "max_output_tokens": 3000,
+                    "temperature": 0.7,
                     "response_mime_type": "application/json",
                 }
             )
@@ -605,7 +603,7 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
         """
         
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,

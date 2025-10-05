@@ -8,14 +8,13 @@ from google import genai
 from google.genai import types
 import os
 import json
+import re
 
 app = FastAPI(title="PDF Analysis API", description="Extract topic trees and generate flashcards from PDF URLs")
 
 # Initialize Gemini client
-client= genai.Client(vertexai=True, 
-                     project=os.getenv("GCP_PROJECT_ID"), 
-                     location = os.getenv("GCP_REGION")
-                )
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
 # Pydantic Models
 class TopicNode(BaseModel):
     title: str
@@ -168,6 +167,95 @@ def map_ai_page_references(ai_page_numbers: List[int], original_source_pages: Li
                 mapped_pages.append(original_source_pages[-1])
     return mapped_pages
 
+def parse_json_with_latex(json_string: str) -> List[dict]:
+    """
+    Parse JSON string that may contain LaTeX with unescaped backslashes
+    """
+    try:
+        # First try direct JSON parsing
+        return json.loads(json_string)
+    except json.JSONDecodeError as e:
+        # If that fails, try to fix common LaTeX backslash issues
+        try:
+            # Replace common LaTeX patterns with properly escaped versions
+            fixed_json = json_string
+            
+            # Fix unescaped backslashes in common LaTeX commands
+            latex_patterns = [
+                (r'\\frac', r'\\\\frac'),
+                (r'\\sqrt', r'\\\\sqrt'),
+                (r'\\alpha', r'\\\\alpha'),
+                (r'\\beta', r'\\\\beta'),
+                (r'\\gamma', r'\\\\gamma'),
+                (r'\\delta', r'\\\\delta'),
+                (r'\\le', r'\\\\le'),
+                (r'\\ge', r'\\\\ge'),
+                (r'\\neq', r'\\\\neq'),
+                (r'\\approx', r'\\\\approx'),
+                (r'\\equiv', r'\\\\equiv'),
+                (r'\\pm', r'\\\\pm'),
+                (r'\\mp', r'\\\\mp'),
+                (r'\\times', r'\\\\times'),
+                (r'\\div', r'\\\\div'),
+                (r'\\cdot', r'\\\\cdot'),
+                (r'\\circ', r'\\\\circ'),
+                (r'\\infty', r'\\\\infty'),
+                (r'\\partial', r'\\\\partial'),
+                (r'\\nabla', r'\\\\nabla'),
+                (r'\\forall', r'\\\\forall'),
+                (r'\\exists', r'\\\\exists'),
+                (r'\\in', r'\\\\in'),
+                (r'\\notin', r'\\\\notin'),
+                (r'\\subset', r'\\\\subset'),
+                (r'\\subseteq', r'\\\\subseteq'),
+                (r'\\supset', r'\\\\supset'),
+                (r'\\supseteq', r'\\\\supseteq'),
+                (r'\\cap', r'\\\\cap'),
+                (r'\\cup', r'\\\\cup'),
+                (r'\\emptyset', r'\\\\emptyset'),
+                (r'\\mathbb', r'\\\\mathbb'),
+                (r'\\mathbf', r'\\\\mathbf'),
+                (r'\\mathcal', r'\\\\mathcal'),
+                (r'\\mathfrak', r'\\\\mathfrak'),
+                (r'\\mathscr', r'\\\\mathscr'),
+                (r'\\mathrm', r'\\\\mathrm'),
+                (r'\\mathsf', r'\\\\mathsf'),
+                (r'\\mathtt', r'\\\\mathtt'),
+                (r'\\mathit', r'\\\\mathit'),
+                (r'\\textbf', r'\\\\textbf'),
+                (r'\\textit', r'\\\\textit'),
+                (r'\\text', r'\\\\text'),
+                (r'\\overline', r'\\\\overline'),
+                (r'\\underline', r'\\\\underline'),
+                (r'\\widehat', r'\\\\widehat'),
+                (r'\\widetilde', r'\\\\widetilde'),
+                (r'\\overrightarrow', r'\\\\overrightarrow'),
+                (r'\\overleftarrow', r'\\\\overleftarrow'),
+                (r'\\dot', r'\\\\dot'),
+                (r'\\ddot', r'\\\\ddot'),
+                (r'\\bar', r'\\\\bar'),
+                (r'\\vec', r'\\\\vec'),
+                (r'\\hat', r'\\\\hat'),
+                (r'\\tilde', r'\\\\tilde'),
+            ]
+            
+            for pattern, replacement in latex_patterns:
+                fixed_json = re.sub(pattern, replacement, fixed_json)
+            
+            return json.loads(fixed_json)
+            
+        except json.JSONDecodeError as e2:
+            # If fixing doesn't work, try a more aggressive approach
+            try:
+                # Remove all backslashes and hope for the best
+                fixed_json = json_string.replace('\\', '')
+                return json.loads(fixed_json)
+            except json.JSONDecodeError as e3:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to parse JSON even after fixing LaTeX: {str(e3)}"
+                )
+
 # API Endpoints
 @app.post("/generate-topic-tree", response_model=TopicTreeResponse)
 async def generate_topic_tree(request: TopicTreeRequest):
@@ -219,7 +307,7 @@ async def generate_topic_tree(request: TopicTreeRequest):
         
         # Use Gemini to analyze the PDF bytes directly
         response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.0-flash-exp",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,
@@ -274,7 +362,7 @@ async def generate_flashcards(request: FlashcardRequest):
         # Split PDF for the specific topic source pages
         split_pdf_bytes = split_pdf_by_pages(pdf_bytes, request.source_pages)
         
-        # Generate flashcards using Gemini
+        # Generate flashcards using Gemini with explicit JSON formatting instructions
         prompt = f"""
         Based on the PDF content about "{request.topic_title}" - {request.topic_description}, 
         generate a list of educational flashcards.
@@ -285,9 +373,20 @@ async def generate_flashcards(request: FlashcardRequest):
         - The first page of this split PDF corresponds to original page {request.source_pages[0]}
         - The last page corresponds to original page {request.source_pages[-1]}
         
+        IMPORTANT FORMATTING INSTRUCTIONS:
+        - Use **Markdown** for text formatting (bold, italics, lists, headers)
+        - Use LaTeX math formatting: $equation$ for inline and $$equation$$ for block math
+        - Use code blocks for programming concepts with ```language code```
+        - Create clear, well-structured flashcards
+        
+        IMPORTANT JSON FORMATTING:
+        - You MUST return valid JSON format
+        - Escape all backslashes in LaTeX with double backslashes (e.g., \\\\frac instead of \\frac)
+        - Use proper JSON string escaping
+        
         For each flashcard, provide:
-        - Front: A clear question, term, or concept prompt
-        - Back: A detailed explanation, definition, or answer
+        - Front: A clear question, term, or concept prompt (use Markdown/LaTeX for formatting)
+        - Back: A detailed explanation, definition, or answer (use Markdown/LaTeX for formatting)
         - Source pages: The specific ORIGINAL page numbers where this information appears (from {request.source_pages})
         
         Create flashcards that cover:
@@ -295,29 +394,21 @@ async def generate_flashcards(request: FlashcardRequest):
         - Important facts and details
         - Conceptual relationships
         - Practical applications
-        - Theroem and Proof 
-        - Term and its definition
-      
-        IMPORTANT FORMATTING INSTRUCTIONS:
-        - Use **Markdown** for formatting text (bold, italics, lists, headers)
-        - Use LaTeX math formatting for mathematical expressions: $equation$ for inline and $$equation$$ for block math
-        - Use code blocks for programming concepts
-        - Create clear, well-structured flashcards
-                                   
-        The number of flashcards should be automatically determined based on the content density and importance. Try to keep the flashcard as few as possible.
+        
+        The number of flashcards should be automatically determined based on the content density and importance.
         
         Return your response as a valid JSON array of flashcard objects with this exact structure:
         [
             {{
-                "front": "Question or concept",
-                "back": "Detailed answer or explanation",
+                "front": "**Concept Name** with $mathematical$ notation",
+                "back": "Detailed explanation with:\\n- Bullet points\\n- **Bold text**\\n- $E = mc^2$\\n- ```python\\nprint('code example')\\n```",
                 "source_pages": [1, 2]
             }}
         ]
         """
         
         response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.0-flash-exp",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,
@@ -327,11 +418,12 @@ async def generate_flashcards(request: FlashcardRequest):
             ],
             config={
                 "temperature": 0.7,
-                "max_output_tokens": 3000,
+                "max_output_tokens": 4000,
+                "response_mime_type": "application/json",
             }
         )
         
-        # Parse flashcards from response
+        # Parse flashcards from response using improved parser
         try:
             response_text = response.text.strip()
             if response_text.startswith('```json'):
@@ -341,7 +433,7 @@ async def generate_flashcards(request: FlashcardRequest):
             if response_text.endswith('```'):
                 response_text = response_text[:-3]
                 
-            flashcards_data = json.loads(fr'{response_text}')
+            flashcards_data = parse_json_with_latex(response_text)
             
             # Map AI page references back to original PDF pages
             for flashcard_data in flashcards_data:
@@ -388,7 +480,7 @@ async def generate_flashcards_from_leaves(request: LeafFlashcardRequest):
             # Use the internal PDF bytes we already downloaded
             split_pdf_bytes = split_pdf_by_pages(pdf_bytes, leaf.source_pages)
             
-            # Generate flashcards (simplified version of the flashcard generation logic)
+            # Generate flashcards with formatting instructions
             prompt = f"""
             Generate educational flashcards for: {leaf.title} - {leaf.description}
             
@@ -396,12 +488,18 @@ async def generate_flashcards_from_leaves(request: LeafFlashcardRequest):
             - The provided PDF contains pages {leaf.source_pages} from the original document.
             - When citing source pages, ALWAYS use the original PDF page numbers: {leaf.source_pages}
             
+            IMPORTANT FORMATTING:
+            - Use **Markdown** for text formatting
+            - Use LaTeX math: $equation$ for inline and $$equation$$ for block
+            - Use code blocks for programming concepts
+            - Escape LaTeX backslashes with double backslashes
+            
             For each flashcard provide:
-            - Front: Question or concept
-            - Back: Detailed explanation  
+            - Front: Question or concept (with formatting)
+            - Back: Detailed explanation (with formatting)
             - Source pages: Specific ORIGINAL page numbers from {leaf.source_pages}
             
-            Return as JSON array of {{"front": "", "back": "", "source_pages": []}}
+            Return as valid JSON array of {{"front": "", "back": "", "source_pages": []}}
             """
             
             response = client.models.generate_content(
@@ -413,7 +511,11 @@ async def generate_flashcards_from_leaves(request: LeafFlashcardRequest):
                     ),
                     prompt
                 ],
-                config={"temperature": 0.7, "max_output_tokens": 3000}
+                config={
+                    "temperature": 0.7, 
+                    "max_output_tokens": 3000,
+                    "response_mime_type": "application/json",
+                }
             )
             
             try:
@@ -425,7 +527,7 @@ async def generate_flashcards_from_leaves(request: LeafFlashcardRequest):
                 if response_text.endswith('```'):
                     response_text = response_text[:-3]
                     
-                flashcards_data = json.loads(response_text)
+                flashcards_data = parse_json_with_latex(response_text)
                 
                 # Map AI page references back to original PDF pages
                 for flashcard_data in flashcards_data:
@@ -473,10 +575,13 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
         - The first page of this split PDF corresponds to original page {request.source_pages[0]}
         - The last page corresponds to original page {request.source_pages[-1]}
         
-        IMPORTANT FORMATTING INSTRUCTIONS:
+        IMPORTANT JSON AND FORMATTING INSTRUCTIONS:
+        - You MUST return valid JSON format
+        - Escape all backslashes in LaTeX with double backslashes (e.g., \\\\frac instead of \\frac)
         - Use **Markdown** for formatting text (bold, italics, lists, headers)
         - Use LaTeX math formatting for mathematical expressions: $equation$ for inline and $$equation$$ for block math
-        - Use code blocks for programming concepts
+        - Use code blocks for programming concepts with ```language code```
+        - Use proper JSON string escaping
         - Create clear, well-structured flashcards
         
         For each flashcard, provide:
@@ -488,7 +593,7 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
         [
             {{
                 "front": "**Concept Name** with $mathematical$ notation",
-                "back": "Detailed explanation with:\\n- Bullet points\\n- **Bold text**\\n- $E = mc^2$\\n- ```code blocks```",
+                "back": "Detailed explanation with:\\n- Bullet points\\n- **Bold text**\\n- $E = mc^2$\\n- ```python\\nprint('code example')\\n```",
                 "source_pages": [1, 2]
             }}
         ]
@@ -497,7 +602,7 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
         """
         
         response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.0-flash-exp",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,
@@ -508,10 +613,11 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
             config={
                 "temperature": 0.7,
                 "max_output_tokens": 4000,
+                "response_mime_type": "application/json",
             }
         )
         
-        # Parse flashcards from response
+        # Parse flashcards from response using improved parser
         try:
             response_text = response.text.strip()
             # Clean response text
@@ -522,7 +628,7 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
             if response_text.endswith('```'):
                 response_text = response_text[:-3]
                 
-            flashcards_data = json.loads(fr'{response_text}')
+            flashcards_data = parse_json_with_latex(response_text)
             
             # Map AI page references back to original PDF pages
             for flashcard_data in flashcards_data:

@@ -321,8 +321,7 @@ async def generate_topic_tree(request: TopicTreeRequest):
                 prompt
             ],
             config={
-                "temperature": 0.3,
-                "max_output_tokens": 4000,
+                "temperature": 0.3
             }
         )
         

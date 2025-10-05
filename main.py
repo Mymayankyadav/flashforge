@@ -341,7 +341,7 @@ async def generate_flashcards(request: FlashcardRequest):
             if response_text.endswith('```'):
                 response_text = response_text[:-3]
                 
-            flashcards_data = json.loads(response_text)
+            flashcards_data = json.loads(fr'{response_text}')
             
             # Map AI page references back to original PDF pages
             for flashcard_data in flashcards_data:
@@ -522,7 +522,7 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
             if response_text.endswith('```'):
                 response_text = response_text[:-3]
                 
-            flashcards_data = json.loads(response_text)
+            flashcards_data = json.loads(fr'{response_text}')
             
             # Map AI page references back to original PDF pages
             for flashcard_data in flashcards_data:

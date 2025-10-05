@@ -8,7 +8,6 @@ from google import genai
 from google.genai import types
 import os
 import json
-import tempfile
 
 app = FastAPI(title="PDF Analysis API", description="Extract topic trees and generate flashcards from PDF URLs")
 
@@ -21,8 +20,7 @@ client= genai.Client(vertexai=True,
 class TopicNode(BaseModel):
     title: str
     description: str
-    start_page: int
-    end_page: int
+    source_pages: List[int]
     subtopics: List["TopicNode"] = []
 
 class TopicTreeRequest(BaseModel):
@@ -43,8 +41,7 @@ class FlashcardRequest(BaseModel):
     pdf_url: HttpUrl
     topic_title: str
     topic_description: str
-    start_page: int
-    end_page: int
+    source_pages: List[int]
 
 class FlashcardResponse(BaseModel):
     topic_title: str
@@ -57,6 +54,20 @@ class LeafFlashcardRequest(BaseModel):
 
 class LeafFlashcardResponse(BaseModel):
     leaf_nodes: List[FlashcardResponse]
+
+class CustomFlashcardRequest(BaseModel):
+    pdf_url: HttpUrl
+    source_pages: List[int]
+    custom_prompt: str
+    topic_title: str = "Custom Flashcards"
+    topic_description: str = "Generated from custom prompt"
+
+class CustomFlashcardResponse(BaseModel):
+    topic_title: str
+    topic_description: str
+    custom_prompt: str
+    flashcards: List[Flashcard]
+    source_pages: List[int]
 
 # Utility Functions
 def download_pdf_from_url(pdf_url: str) -> bytes:
@@ -140,6 +151,23 @@ def find_leaf_nodes(topic_tree: List[TopicNode]) -> List[TopicNode]:
         
     return leaf_nodes
 
+def map_ai_page_references(ai_page_numbers: List[int], original_source_pages: List[int]) -> List[int]:
+    """
+    Map AI's page references (based on split PDF) back to original PDF page numbers
+    """
+    mapped_pages = []
+    for ai_page in ai_page_numbers:
+        # AI pages are 1-indexed relative to the split PDF
+        if 1 <= ai_page <= len(original_source_pages):
+            mapped_pages.append(original_source_pages[ai_page - 1])
+        else:
+            # If AI references a page outside split PDF range, use the closest valid page
+            if ai_page < 1:
+                mapped_pages.append(original_source_pages[0])
+            else:
+                mapped_pages.append(original_source_pages[-1])
+    return mapped_pages
+
 # API Endpoints
 @app.post("/generate-topic-tree", response_model=TopicTreeResponse)
 async def generate_topic_tree(request: TopicTreeRequest):
@@ -157,14 +185,18 @@ async def generate_topic_tree(request: TopicTreeRequest):
         prompt = f"""
         Analyze the PDF content and generate a hierarchical topic tree with up to {request.max_depth} levels of depth.
         
+        IMPORTANT PAGE NUMBERING:
+        - The provided PDF contains pages {request.pages} from the original document.
+        - When citing page numbers, ALWAYS use the original PDF page numbers: {request.pages}
+        - The first page of this split PDF corresponds to original page {request.pages[0]}
+        - The last page corresponds to original page {request.pages[-1]}
+        
         For each topic, provide:
         - Title: Clear, descriptive topic name
         - Description: 1-2 sentence explanation of the topic content
-        - Start page: First page where this topic appears (using 1-indexed page numbers as in the original PDF)
-        - End page: Last page where this topic appears
+        - Source pages: List of original page numbers where this topic appears (from {request.pages})
         - Subtopic: Nested sub-topics for deeper hierarchy
         
-        The provided PDF contains pages {request.pages} from the original document. 
         Create a structured, organized topic tree that captures the main ideas and their relationships.
         
         Return your response as a valid JSON array of topic objects with this exact structure:
@@ -172,14 +204,12 @@ async def generate_topic_tree(request: TopicTreeRequest):
             {{
                 "title": "Topic Name",
                 "description": "Topic description",
-                "start_page": 1,
-                "end_page": 3,
+                "source_pages": [1, 2, 3],
                 "subtopics": [
                     {{
                         "title": "Subtopic Name",
                         "description": "Subtopic description", 
-                        "start_page": 2,
-                        "end_page": 3,
+                        "source_pages": [2, 3],
                         "subtopics": []
                     }}
                 ]
@@ -235,41 +265,37 @@ async def generate_topic_tree(request: TopicTreeRequest):
 @app.post("/generate-flashcards", response_model=FlashcardResponse)
 async def generate_flashcards(request: FlashcardRequest):
     """
-    Generate flashcards from a specific topic using its page range
+    Generate flashcards from a specific topic using its source pages
     """
     try:
         # Download PDF from URL
         pdf_bytes = download_pdf_from_url(str(request.pdf_url))
         
-        # Create page range for the topic
-        page_range = list(range(request.start_page, request.end_page + 1))
-        
-        # Split PDF for the specific topic page range
-        split_pdf_bytes = split_pdf_by_pages(pdf_bytes, page_range)
+        # Split PDF for the specific topic source pages
+        split_pdf_bytes = split_pdf_by_pages(pdf_bytes, request.source_pages)
         
         # Generate flashcards using Gemini
         prompt = f"""
         Based on the PDF content about "{request.topic_title}" - {request.topic_description}, 
         generate a list of educational flashcards.
         
+        IMPORTANT PAGE NUMBERING:
+        - The provided PDF contains pages {request.source_pages} from the original document.
+        - When citing source pages, ALWAYS use the original PDF page numbers: {request.source_pages}
+        - The first page of this split PDF corresponds to original page {request.source_pages[0]}
+        - The last page corresponds to original page {request.source_pages[-1]}
+        
         For each flashcard, provide:
         - Front: A clear question, term, or concept prompt
         - Back: A detailed explanation, definition, or answer
-        - Source pages: The specific page numbers where this information appears (from pages {page_range})
+        - Source pages: The specific ORIGINAL page numbers where this information appears (from {request.source_pages})
         
         Create flashcards that cover:
         - Key concepts and definitions
         - Important facts and details
         - Conceptual relationships
         - Practical applications
-        - Theorem and a proof 
-
-        IMPORTANT FORMATTING INSTRUCTIONS:
-        - Use **Markdown** for formatting text (bold, italics, lists, headers)
-        - Use LaTeX math formatting for mathematical expressions: $equation$ for inline and $$equation$$ for block math
-        - Use code blocks for programming concepts
-        - Create clear, well-structured flashcards
-                                   
+        
         The number of flashcards should be automatically determined based on the content density and importance.
         
         Return your response as a valid JSON array of flashcard objects with this exact structure:
@@ -308,6 +334,12 @@ async def generate_flashcards(request: FlashcardRequest):
                 response_text = response_text[:-3]
                 
             flashcards_data = json.loads(response_text)
+            
+            # Map AI page references back to original PDF pages
+            for flashcard_data in flashcards_data:
+                ai_source_pages = flashcard_data.get("source_pages", [])
+                flashcard_data["source_pages"] = map_ai_page_references(ai_source_pages, request.source_pages)
+            
             flashcards = [Flashcard(**card) for card in flashcards_data]
         except (json.JSONDecodeError, KeyError) as e:
             raise HTTPException(
@@ -345,26 +377,21 @@ async def generate_flashcards_from_leaves(request: LeafFlashcardRequest):
         
         # Generate flashcards for each leaf node
         for leaf in leaf_nodes:
-            flashcard_request = FlashcardRequest(
-                pdf_url=request.pdf_url,
-                topic_title=leaf.title,
-                topic_description=leaf.description,
-                start_page=leaf.start_page,
-                end_page=leaf.end_page
-            )
-            
             # Use the internal PDF bytes we already downloaded
-            page_range = list(range(leaf.start_page, leaf.end_page + 1))
-            split_pdf_bytes = split_pdf_by_pages(pdf_bytes, page_range)
+            split_pdf_bytes = split_pdf_by_pages(pdf_bytes, leaf.source_pages)
             
             # Generate flashcards (simplified version of the flashcard generation logic)
             prompt = f"""
             Generate educational flashcards for: {leaf.title} - {leaf.description}
             
+            IMPORTANT PAGE NUMBERING:
+            - The provided PDF contains pages {leaf.source_pages} from the original document.
+            - When citing source pages, ALWAYS use the original PDF page numbers: {leaf.source_pages}
+            
             For each flashcard provide:
             - Front: Question or concept
             - Back: Detailed explanation  
-            - Source pages: Specific page numbers from {page_range}
+            - Source pages: Specific ORIGINAL page numbers from {leaf.source_pages}
             
             Return as JSON array of {{"front": "", "back": "", "source_pages": []}}
             """
@@ -391,6 +418,12 @@ async def generate_flashcards_from_leaves(request: LeafFlashcardRequest):
                     response_text = response_text[:-3]
                     
                 flashcards_data = json.loads(response_text)
+                
+                # Map AI page references back to original PDF pages
+                for flashcard_data in flashcards_data:
+                    ai_source_pages = flashcard_data.get("source_pages", [])
+                    flashcard_data["source_pages"] = map_ai_page_references(ai_source_pages, leaf.source_pages)
+                
                 flashcards = [Flashcard(**card) for card in flashcards_data]
                 
                 results.append(FlashcardResponse(
@@ -409,20 +442,6 @@ async def generate_flashcards_from_leaves(request: LeafFlashcardRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Leaf flashcard generation failed: {str(e)}")
-        
-class CustomFlashcardRequest(BaseModel):
-    pdf_url: HttpUrl
-    source_pages: List[int]
-    custom_prompt: str
-    topic_title: str = "Custom Flashcards"
-    topic_description: str = "Generated from custom prompt"
-
-class CustomFlashcardResponse(BaseModel):
-    topic_title: str
-    topic_description: str
-    custom_prompt: str
-    flashcards: List[Flashcard]
-    source_pages: List[int]
 
 @app.post("/generate-custom-flashcards", response_model=CustomFlashcardResponse)
 async def generate_custom_flashcards(request: CustomFlashcardRequest):
@@ -440,6 +459,12 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
         enhanced_prompt = f"""
         CUSTOM PROMPT: {request.custom_prompt}
         
+        IMPORTANT PAGE NUMBERING:
+        - The provided PDF contains pages {request.source_pages} from the original document.
+        - When citing source pages, ALWAYS use the original PDF page numbers: {request.source_pages}
+        - The first page of this split PDF corresponds to original page {request.source_pages[0]}
+        - The last page corresponds to original page {request.source_pages[-1]}
+        
         IMPORTANT FORMATTING INSTRUCTIONS:
         - Use **Markdown** for formatting text (bold, italics, lists, headers)
         - Use LaTeX math formatting for mathematical expressions: $equation$ for inline and $$equation$$ for block math
@@ -449,13 +474,13 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
         For each flashcard, provide:
         - Front: Question, concept, or term (formatted with Markdown/LaTeX)
         - Back: Detailed explanation with proper formatting
-        - Source pages: Specific page numbers from {request.source_pages}
+        - Source pages: Specific ORIGINAL page numbers from {request.source_pages}
         
         Return your response as a valid JSON array of flashcard objects with this exact structure:
         [
             {{
                 "front": "**Concept Name** with $mathematical$ notation",
-                "back": "Detailed explanation with:\n- Bullet points\n- **Bold text**\n- $E = mc^2$\n- ```code blocks```",
+                "back": "Detailed explanation with:\\n- Bullet points\\n- **Bold text**\\n- $E = mc^2$\\n- ```code blocks```",
                 "source_pages": [1, 2]
             }}
         ]
@@ -475,7 +500,6 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
             config={
                 "temperature": 0.7,
                 "max_output_tokens": 4000,
-                "response_mime_type": "application/json",
             }
         )
         
@@ -491,6 +515,12 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
                 response_text = response_text[:-3]
                 
             flashcards_data = json.loads(response_text)
+            
+            # Map AI page references back to original PDF pages
+            for flashcard_data in flashcards_data:
+                ai_source_pages = flashcard_data.get("source_pages", [])
+                flashcard_data["source_pages"] = map_ai_page_references(ai_source_pages, request.source_pages)
+            
             flashcards = [Flashcard(**card) for card in flashcards_data]
             
         except (json.JSONDecodeError, KeyError) as e:
@@ -514,7 +544,7 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
 
 @app.get("/")
 async def root():
-    return {"message": "PDF Analysis API - Use /generate-topic-tree, /generate-flashcards, and /generate-flashcards-from-leaves endpoints"}
+    return {"message": "PDF Analysis API - Use /generate-topic-tree, /generate-flashcards, /generate-flashcards-from-leaves, and /generate-custom-flashcards endpoints"}
 
 @app.get("/health")
 async def health_check():

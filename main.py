@@ -640,6 +640,7 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
             for flashcard_data in flashcards_data:
                 ai_source_pages = flashcard_data.get("source_pages", [])
                 flashcard_data["source_pages"] = map_ai_page_references(ai_source_pages, request.source_pages)
+              
             
             flashcards = [Flashcard(**card) for card in flashcards_data]
             
@@ -661,15 +662,20 @@ async def generate_custom_flashcards(request: CustomFlashcardRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Custom flashcard generation failed: {str(e)}")
+      
+class IncompleteFlashcard(BaseModel):
+    front: str
+    back: str
+
 class RefineFlashcardRequest(BaseModel):
     pdf_url: HttpUrl
     source_pages: List[int]
-    incomplete_flashcard: str
+    incomplete_flashcard: IncompleteFlashcard
     current_topic: str = "General Topic"
 
 class RefineFlashcardResponse(BaseModel):
-    original_prompt: str
-    refined_flashcards: List[Flashcard]
+    original_flashcard: IncompleteFlashcard
+    refined_flashcard: Flashcard
     source_pages: List[int]
     interpretation: str
 
@@ -677,6 +683,7 @@ class RefineFlashcardResponse(BaseModel):
 async def refine_flashcard(request: RefineFlashcardRequest):
     """
     Refine an incomplete flashcard by understanding user intent using the PDF context
+    Returns a single refined flashcard
     """
     try:
         # Download PDF from URL
@@ -685,9 +692,12 @@ async def refine_flashcard(request: RefineFlashcardRequest):
         # Split PDF for the specified source pages
         split_pdf_bytes = split_pdf_by_pages(pdf_bytes, request.source_pages)
         
-        # Enhanced prompt for understanding user intent and refining flashcards
+        # Enhanced prompt for understanding user intent and refining a single flashcard
         prompt = f"""
-        USER'S INCOMPLETE FLASHCARD PROMPT: "{request.incomplete_flashcard}"
+        USER'S INCOMPLETE FLASHCARD:
+        Front: "{request.incomplete_flashcard.front}"
+        Back: "{request.incomplete_flashcard.back}"
+        
         TOPIC CONTEXT: {request.current_topic}
         
         IMPORTANT PAGE NUMBERING:
@@ -695,14 +705,16 @@ async def refine_flashcard(request: RefineFlashcardRequest):
         - When citing source pages, ALWAYS use the original PDF page numbers: {request.source_pages}
         
         TASK:
-        1. Analyze the user's incomplete flashcard prompt and understand what they're trying to learn/create
-        2. Use the PDF content to generate complete, well-structured flashcards that fulfill their intent
-        3. Provide multiple flashcards if the prompt suggests multiple concepts
+        1. Analyze the user's incomplete flashcard and understand what they're trying to achieve
+        2. Use the PDF content to refine and improve this single flashcard
+        3. Enhance both front and back with better clarity, accuracy, and educational value
+        4. Maintain the core concept but improve the expression and completeness
         
-        INTERPRETATION GUIDELINES:
-        - If the prompt is vague, expand it into clear educational objectives
-        - If the prompt is specific but incomplete, complete the thought
-        - If the prompt suggests multiple concepts, break it into multiple flashcards
+        REFINEMENT GUIDELINES:
+        - If the front is vague, make it more specific and clear
+        - If the back is incomplete, expand it with comprehensive information from the PDF
+        - Add proper formatting (Markdown for text, LaTeX for math)
+        - Ensure the flashcard is self-contained and educational
         - Focus on the key learning objectives from the PDF pages
         
         FORMATTING REQUIREMENTS:
@@ -712,20 +724,17 @@ async def refine_flashcard(request: RefineFlashcardRequest):
         - Escape LaTeX backslashes with double backslashes
         
         OUTPUT STRUCTURE:
-        - Provide a brief interpretation of what the user was trying to achieve
-        - Generate 1-5 flashcards that fulfill their learning intent
-        - Each flashcard must have front, back, and source_pages
+        - Provide a brief interpretation of what improvements were made
+        - Return exactly ONE refined flashcard with front, back, and source_pages
         
         Return your response as valid JSON with this exact structure:
         {{
-            "interpretation": "Brief explanation of what the user was trying to achieve",
-            "flashcards": [
-                {{
-                    "front": "Complete front of flashcard with formatting",
-                    "back": "Complete back of flashcard with detailed explanation",
-                    "source_pages": [1, 2]
-                }}
-            ]
+            "interpretation": "Brief explanation of improvements made",
+            "refined_flashcard": {{
+                "front": "Refined and improved front of the flashcard",
+                "back": "Refined and improved back with detailed explanation",
+                "source_pages": [1, 2]
+            }}
         }}
         """
         
@@ -740,7 +749,6 @@ async def refine_flashcard(request: RefineFlashcardRequest):
             ],
             config={
                 "temperature": 0.7,
-                "max_output_tokens": 4000,
                 "response_mime_type": "application/json",
             }
         )
@@ -757,23 +765,24 @@ async def refine_flashcard(request: RefineFlashcardRequest):
                 
             refinement_data = parse_json_with_latex(response_text)
             
-            # Map AI page references back to original PDF pages
-            flashcards_data = refinement_data.get("flashcards", [])
-            for flashcard_data in flashcards_data:
-                ai_source_pages = flashcard_data.get("source_pages", [])
-                flashcard_data["source_pages"] = map_ai_page_references(ai_source_pages, request.source_pages)
+            # Get the single refined flashcard
+            refined_data = refinement_data.get("refined_flashcard", {})
             
-            flashcards = [Flashcard(**card) for card in flashcards_data]
+            # Map AI page references back to original PDF pages
+            ai_source_pages = refined_data.get("source_pages", [])
+            refined_data["source_pages"] = map_ai_page_references(ai_source_pages, request.source_pages)
+            
+            refined_flashcard = Flashcard(**refined_data)
             
         except (json.JSONDecodeError, KeyError) as e:
             raise HTTPException(
                 status_code=500, 
-                detail=f"Failed to parse refined flashcards from AI response: {str(e)}\nResponse: {response.text}"
+                detail=f"Failed to parse refined flashcard from AI response: {str(e)}\nResponse: {response.text}"
             )
         
         return RefineFlashcardResponse(
-            original_prompt=request.incomplete_flashcard,
-            refined_flashcards=flashcards,
+            original_flashcard=request.incomplete_flashcard,
+            refined_flashcard=refined_flashcard,
             source_pages=request.source_pages,
             interpretation=refinement_data.get("interpretation", "Interpretation not provided")
         )
@@ -782,7 +791,7 @@ async def refine_flashcard(request: RefineFlashcardRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Flashcard refinement failed: {str(e)}")
-
+        
 class FormatImprovementRequest(BaseModel):
     pdf_url: HttpUrl
     source_pages: List[int]

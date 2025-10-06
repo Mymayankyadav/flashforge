@@ -313,7 +313,7 @@ async def generate_topic_tree(request: TopicTreeRequest):
         
         # Use Gemini to analyze the PDF bytes directly
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-pro",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,
@@ -322,7 +322,7 @@ async def generate_topic_tree(request: TopicTreeRequest):
                 prompt
             ],
             config={
-                "temperature": 0.2
+                "temperature": 0.7
             }
         )
         
@@ -416,7 +416,7 @@ async def generate_flashcards(request: FlashcardRequest):
         """
         
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-pro",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,
@@ -880,7 +880,6 @@ async def improve_formatting(request: FormatImprovementRequest):
             ],
             config={
                 "temperature": 0.3,
-                "max_output_tokens": 3000,
                 "response_mime_type": "application/json",
             }
         )

@@ -913,7 +913,164 @@ async def improve_formatting(request: FormatImprovementRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Formatting improvement failed: {str(e)}")
+        
+class QuestionExtractionRequest(BaseModel):
+    pdf_url: HttpUrl
+    pages: List[int]
+    question_types: List[str] = ["multiple_choice", "short_answer", "problem_solving"]  # Types of questions to extract
+    include_answers: bool = False  # Whether to extract answers if available
 
+class ExtractedQuestion(BaseModel):
+    question_number: Optional[str] = None
+    question_text: str
+    question_type: str
+    source_page: int
+    options: List[str] = []  # For multiple choice questions
+    answer: Optional[str] = None  # Only if include_answers is True
+
+class QuestionExtractionResponse(BaseModel):
+    questions: List[ExtractedQuestion]
+    total_questions: int
+    source_pages: List[int]
+    extraction_summary: str
+
+@app.post("/extract-questions", response_model=QuestionExtractionResponse)
+async def extract_questions(request: QuestionExtractionRequest):
+    """
+    Extract questions from exercises in specified PDF pages with LaTeX formatting
+    """
+    try:
+        # Download PDF from URL
+        pdf_bytes = download_pdf_from_url(str(request.pdf_url))
+        
+        # Split PDF to keep only specified pages
+        split_pdf_bytes = split_pdf_by_pages(pdf_bytes, request.pages)
+        
+        # Build question type description
+        question_types_str = ", ".join(request.question_types)
+        answer_instruction = "Include answers if they are present in the text." if request.include_answers else "Do not include answers, only extract the questions."
+        
+        # Prompt for question extraction with LaTeX formatting
+        prompt = f"""
+        Analyze the PDF content and extract all questions from exercises, problems, and assessments.
+        
+        IMPORTANT PAGE NUMBERING:
+        - The provided PDF contains pages {request.pages} from the original document.
+        - When citing source pages, ALWAYS use the original PDF page numbers: {request.pages}
+        
+        QUESTION TYPES TO EXTRACT: {question_types_str}
+        {answer_instruction}
+        
+        EXTRACTION GUIDELINES:
+        1. Look for sections labeled: Exercises, Problems, Questions, Assessment, Review Questions, etc.
+        2. Extract both standalone questions and questions within problem sets
+        3. Identify multiple choice questions and extract both question and options
+        4. For mathematical questions, preserve all mathematical notation using LaTeX
+        5. Maintain the original numbering if present
+        
+        FORMATTING REQUIREMENTS:
+        - Use LaTeX math formatting for all mathematical expressions: $equation$ for inline and $$equation$$ for block math
+        - Preserve all mathematical symbols, equations, and notation
+        - Keep the original structure and wording as much as possible
+        - Format chemical formulas and scientific notation appropriately
+        
+        QUESTION TYPES:
+        - multiple_choice: Questions with options (A, B, C, D, etc.)
+        - short_answer: Brief response questions
+        - problem_solving: Mathematical problems requiring step-by-step solutions
+        - true_false: True/False questions
+        - fill_in_blank: Fill in the blank questions
+        
+        OUTPUT STRUCTURE:
+        Return your response as valid JSON with this exact structure:
+        {{
+            "extraction_summary": "Brief summary of what was extracted",
+            "questions": [
+                {{
+                    "question_number": "1.1",
+                    "question_text": "What is the derivative of $f(x) = x^2$?",
+                    "question_type": "short_answer",
+                    "source_page": 1,
+                    "options": ["Option A", "Option B", "Option C", "Option D"],
+                    "answer": "$2x$"
+                }},
+                {{
+                    "question_number": null,
+                    "question_text": "Solve the equation: $$x^2 + 2x + 1 = 0$$",
+                    "question_type": "problem_solving", 
+                    "source_page": 1,
+                    "options": [],
+                    "answer": null
+                }}
+            ]
+        }}
+        
+        Note: Only include 'answer' field if explicitly requested and if answers are present in the text.
+        """
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(
+                    data=split_pdf_bytes,
+                    mime_type='application/pdf'
+                ),
+                prompt
+            ],
+            config={
+                "temperature": 0.2,
+                "response_mime_type": "application/json",
+            }
+        )
+        
+        # Parse the response
+        try:
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.startswith('```'):
+                response_text = response_text[3:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
+                
+            extraction_data = parse_json_with_latex(response_text)
+            
+            # Process extracted questions
+            questions_data = extraction_data.get("questions", [])
+            questions = []
+            
+            for q_data in questions_data:
+                # Map AI page references back to original PDF pages
+                ai_source_page = q_data.get("source_page", 1)
+                if 1 <= ai_source_page <= len(request.pages):
+                    q_data["source_page"] = request.pages[ai_source_page - 1]
+                else:
+                    q_data["source_page"] = request.pages[0]  # Fallback to first page
+                
+                # Remove answer if not requested
+                if not request.include_answers:
+                    q_data["answer"] = None
+                
+                questions.append(ExtractedQuestion(**q_data))
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to parse extracted questions from AI response: {str(e)}\nResponse: {response.text}"
+            )
+        
+        return QuestionExtractionResponse(
+            questions=questions,
+            total_questions=len(questions),
+            source_pages=request.pages,
+            extraction_summary=extraction_data.get("extraction_summary", "Questions extracted successfully")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Question extraction failed: {str(e)}")
+        
 @app.get("/")
 async def root():
     return {"message": "PDF Analysis API - Use /generate-topic-tree, /generate-flashcards, /generate-flashcards-from-leaves, and /generate-custom-flashcards endpoints"}

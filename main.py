@@ -967,6 +967,7 @@ async def extract_questions(request: QuestionExtractionRequest):
         3. Identify multiple choice questions and extract both question and options
         4. For mathematical questions, preserve all mathematical notation using LaTeX
         5. Maintain the original numbering if present
+        6. Make sure the question is complete when extracted. 
         
         FORMATTING REQUIREMENTS:
         - Use LaTeX math formatting for all mathematical expressions: $equation$ for inline and $$equation$$ for block math
@@ -1009,7 +1010,7 @@ async def extract_questions(request: QuestionExtractionRequest):
         """
         
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-flaah",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,

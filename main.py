@@ -1010,7 +1010,7 @@ async def extract_questions(request: QuestionExtractionRequest):
         """
         
         response = client.models.generate_content(
-            model="gemini-2.5-flaah",
+            model="gemini-2.5-flash",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,

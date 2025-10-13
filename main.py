@@ -1154,7 +1154,7 @@ async def complete_proof(request: ProofCompletionRequest):
             ]
         }}
         
-        The proof should be mathematically rigorous and follow standard proof techniques appropriate for the content.
+        The proof should be mathematically rigorous and follow standard proof techniques appropriate for the content. **Keep the proof short**.
         """
         
         response = client.models.generate_content(

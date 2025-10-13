@@ -974,6 +974,7 @@ async def extract_questions(request: QuestionExtractionRequest):
         - Preserve all mathematical symbols, equations, and notation
         - Keep the original structure and wording as much as possible
         - Format chemical formulas and scientific notation appropriately
+        - Escape all backslashes in LaTeX with double backslashes (e.g., \\\\frac instead of \\frac)
         
         QUESTION TYPES:
         - multiple_choice: Questions with options (A, B, C, D, etc.)
@@ -1109,13 +1110,9 @@ async def complete_proof(request: ProofCompletionRequest):
         prompt = f"""
         THEOREM/QUESTION TO PROVE: {request.theorem_or_question}
         PROOF GUIDELINES: {request.proof_guidelines}
-        
-        IMPORTANT PAGE NUMBERING:
-        - The provided PDF contains pages {request.pages} from the original document.
-        
+    
         TASK:
         Write a complete, rigorous mathematical proof based on the given theorem/question and proof guidelines.
-        Use the PDF content as context to understand the mathematical framework, definitions, and previous results.
         
         PROOF REQUIREMENTS:
         1. Follow the provided guidelines precisely
@@ -1129,6 +1126,7 @@ async def complete_proof(request: ProofCompletionRequest):
         - Use **Markdown** for text formatting and structure
         - Clearly label assumptions, definitions, and conclusions
         - Use proper mathematical symbols and notation
+        - Escape all backslashes in LaTeX with double backslashes (e.g., \\\\frac instead of \\frac)
         
         PROOF STRUCTURE:
         - Start with clear statement of what is to be proven
@@ -1162,15 +1160,10 @@ async def complete_proof(request: ProofCompletionRequest):
         response = client.models.generate_content(
             model="gemini-2.5-pro",
             contents=[
-                types.Part.from_bytes(
-                    data=split_pdf_bytes,
-                    mime_type='application/pdf'
-                ),
-                prompt
+                  prompt
             ],
             config={
                 "temperature": 0.3,
-                "max_output_tokens": 4000,
                 "response_mime_type": "application/json",
             }
         )

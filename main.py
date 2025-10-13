@@ -1287,6 +1287,7 @@ async def analyze_proof(request: ProofAnalysisRequest):
         FORMATTING REQUIREMENTS:
         - Use LaTeX math formatting: $equation$ for inline and $$equation$$ for block math
         - Use **Markdown** for clear structure and emphasis
+        - Escape all backslashes in LaTeX with double backslashes (e.g., \\\\frac instead of \\frac)
         
         OUTPUT STRUCTURE:
         Return your response as valid JSON with this exact structure:

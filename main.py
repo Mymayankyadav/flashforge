@@ -1210,6 +1210,177 @@ async def complete_proof(request: ProofCompletionRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Proof completion failed: {str(e)}")      
+class ProofAnalysisRequest(BaseModel):
+    pdf_url: HttpUrl
+    pages: List[int]
+    proof_to_analyze: str
+    theorem_statement: str
+    analysis_depth: str = "rigorous"  # quick, detailed, rigorous
+
+class LogicalFlaw(BaseModel):
+    flaw_type: str
+    description: str
+    location_in_proof: str
+    severity: str  # minor, moderate, critical
+    suggested_correction: Optional[str] = None
+
+class CounterExample(BaseModel):
+    description: str
+    mathematical_expression: Optional[str] = None
+    explanation: str
+
+class ProofAnalysisResponse(BaseModel):
+    theorem_statement: str
+    proof_provided: str
+    is_valid: bool
+    overall_assessment: str
+    logical_flaws: List[LogicalFlaw]
+    counter_examples: List[CounterExample]
+    corrected_proof: Optional[str] = None
+    source_pages: List[int]
+    analysis_methodology: str
+
+@app.post("/analyze-proof", response_model=ProofAnalysisResponse)
+async def analyze_proof(request: ProofAnalysisRequest):
+    """
+    Rigorously analyze a mathematical proof for logical flaws and counterexamples
+    """
+    try:
+        # Download PDF from URL
+        pdf_bytes = download_pdf_from_url(str(request.pdf_url))
+        
+        # Split PDF to keep only specified pages
+        split_pdf_bytes = split_pdf_by_pages(pdf_bytes, request.pages)
+        
+        # Prompt for rigorous proof analysis
+        prompt = f"""
+        THEOREM STATEMENT: {request.theorem_statement}
+        PROOF TO ANALYZE: {request.proof_to_analyze}
+        ANALYSIS DEPTH: {request.analysis_depth}
+        
+        IMPORTANT PAGE NUMBERING:
+        - The provided PDF contains pages {request.pages} from the original document.
+        
+        TASK:
+        Conduct a rigorous mathematical analysis of the given proof. Identify any logical flaws, 
+        gaps in reasoning, incorrect assumptions, or mathematical errors. Provide counterexamples 
+        if the proof is invalid or the theorem is false.
+        
+        ANALYSIS METHODOLOGY:
+        1. Check each logical step for validity
+        2. Verify all mathematical assumptions and premises
+        3. Test boundary cases and edge cases
+        4. Look for circular reasoning or unfounded leaps
+        5. Verify the proof structure and conclusion
+        
+        COMMON FLAW TYPES TO IDENTIFY:
+        - Circular reasoning
+        - False dichotomy
+        - Begging the question
+        - Incorrect use of mathematical induction
+        - Invalid assumptions
+        - Gaps in logical progression
+        - Incorrect application of theorems
+        - Arithmetic or algebraic errors
+        - Quantifier errors (∀ vs ∃)
+        - Case analysis omissions
+        
+        COUNTEREXAMPLE GUIDELINES:
+        - Provide explicit counterexamples if the theorem is false
+        - Include mathematical expressions and explanations
+        - Show why the counterexample violates the theorem conditions
+        - Use LaTeX for mathematical notation
+        
+        FORMATTING REQUIREMENTS:
+        - Use LaTeX math formatting: $equation$ for inline and $$equation$$ for block math
+        - Use **Markdown** for clear structure and emphasis
+        
+        OUTPUT STRUCTURE:
+        Return your response as valid JSON with this exact structure:
+        {{
+            "is_valid": false,
+            "overall_assessment": "Detailed assessment of proof validity",
+            "analysis_methodology": "Description of analysis approach used",
+            "logical_flaws": [
+                {{
+                    "flaw_type": "Circular Reasoning",
+                    "description": "Detailed description of the flaw",
+                    "location_in_proof": "Step 3, line 2",
+                    "severity": "critical",
+                    "suggested_correction": "How to fix this flaw"
+                }}
+            ],
+            "counter_examples": [
+                {{
+                    "description": "Clear description of counterexample",
+                    "mathematical_expression": "$$ mathematical expression $$",
+                    "explanation": "Why this counterexample invalidates the proof/theorem"
+                }}
+            ],
+            "corrected_proof": "Optional: A corrected version of the proof if flaws can be fixed"
+        }}
+        
+        Be thorough and mathematically rigorous in your analysis. Even subtle flaws should be identified.
+        """
+        
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=[
+                types.Part.from_bytes(
+                    data=split_pdf_bytes,
+                    mime_type='application/pdf'
+                ),
+                prompt
+            ],
+            config={
+                "temperature": 0.1,  # Low temperature for rigorous analysis
+                "max_output_tokens": 5000,
+                "response_mime_type": "application/json",
+            }
+        )
+        
+        # Parse the response
+        try:
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.startswith('```'):
+                response_text = response_text[3:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
+                
+            analysis_data = parse_json_with_latex(response_text)
+            
+            # Process logical flaws
+            flaws_data = analysis_data.get("logical_flaws", [])
+            logical_flaws = [LogicalFlaw(**flaw) for flaw in flaws_data]
+            
+            # Process counter examples
+            counter_examples_data = analysis_data.get("counter_examples", [])
+            counter_examples = [CounterExample(**ce) for ce in counter_examples_data]
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to parse proof analysis from AI response: {str(e)}\nResponse: {response.text}"
+            )
+        
+        return ProofAnalysisResponse(
+            theorem_statement=request.theorem_statement,
+            proof_provided=request.proof_to_analyze,
+            is_valid=analysis_data.get("is_valid", False),
+            overall_assessment=analysis_data.get("overall_assessment", "Analysis incomplete"),
+            logical_flaws=logical_flaws,
+            counter_examples=counter_examples,
+            corrected_proof=analysis_data.get("corrected_proof"),
+            source_pages=request.pages,
+            analysis_methodology=analysis_data.get("analysis_methodology", "Rigorous mathematical analysis")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Proof analysis failed: {str(e)}")
 
 @app.get("/")
 async def root():

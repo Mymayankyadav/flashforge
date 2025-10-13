@@ -1324,7 +1324,7 @@ async def analyze_proof(request: ProofAnalysisRequest):
         """
         
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-pro",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,

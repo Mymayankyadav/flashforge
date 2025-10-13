@@ -1071,7 +1071,146 @@ async def extract_questions(request: QuestionExtractionRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Question extraction failed: {str(e)}")
+
+
+class ProofCompletionRequest(BaseModel):
+    pdf_url: HttpUrl
+    pages: List[int]
+    theorem_or_question: str
+    proof_guidelines: str
+    include_step_by_step: bool = True
+
+class ProofStep(BaseModel):
+    step_number: int
+    description: str
+    mathematical_expression: Optional[str] = None
+
+class ProofCompletionResponse(BaseModel):
+    theorem_or_question: str
+    proof_guidelines: str
+    complete_proof: str
+    proof_steps: List[ProofStep]
+    source_pages: List[int]
+    proof_summary: str
+
+@app.post("/complete-proof", response_model=ProofCompletionResponse)
+async def complete_proof(request: ProofCompletionRequest):
+    """
+    Complete a mathematical proof based on guidelines using PDF context
+    """
+    try:
+        # Download PDF from URL
+        pdf_bytes = download_pdf_from_url(str(request.pdf_url))
         
+        # Split PDF to keep only specified pages
+        split_pdf_bytes = split_pdf_by_pages(pdf_bytes, request.pages)
+        
+        # Prompt for proof completion with LaTeX formatting
+        prompt = f"""
+        THEOREM/QUESTION TO PROVE: {request.theorem_or_question}
+        PROOF GUIDELINES: {request.proof_guidelines}
+        
+        IMPORTANT PAGE NUMBERING:
+        - The provided PDF contains pages {request.pages} from the original document.
+        
+        TASK:
+        Write a complete, rigorous mathematical proof based on the given theorem/question and proof guidelines.
+        Use the PDF content as context to understand the mathematical framework, definitions, and previous results.
+        
+        PROOF REQUIREMENTS:
+        1. Follow the provided guidelines precisely
+        2. Provide a step-by-step logical progression
+        3. Include all necessary mathematical justifications
+        4. Use proper mathematical notation and terminology
+        5. Ensure the proof is self-contained and easy to follow
+        
+        FORMATTING REQUIREMENTS:
+        - Use LaTeX math formatting for all mathematical expressions: $equation$ for inline and $$equation$$ for block math
+        - Use **Markdown** for text formatting and structure
+        - Clearly label assumptions, definitions, and conclusions
+        - Use proper mathematical symbols and notation
+        
+        PROOF STRUCTURE:
+        - Start with clear statement of what is to be proven
+        - List any assumptions or given conditions
+        - Provide step-by-step logical reasoning
+        - Include necessary mathematical expressions and equations
+        - End with a clear conclusion
+        
+        OUTPUT STRUCTURE:
+        Return your response as valid JSON with this exact structure:
+        {{
+            "proof_summary": "Brief summary of the proof approach",
+            "complete_proof": "The full proof text with LaTeX and Markdown formatting",
+            "proof_steps": [
+                {{
+                    "step_number": 1,
+                    "description": "Description of this proof step",
+                    "mathematical_expression": "$$ mathematical expression $$"
+                }},
+                {{
+                    "step_number": 2,
+                    "description": "Next step description", 
+                    "mathematical_expression": "$inline math$"
+                }}
+            ]
+        }}
+        
+        The proof should be mathematically rigorous and follow standard proof techniques appropriate for the content.
+        """
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-pro",
+            contents=[
+                types.Part.from_bytes(
+                    data=split_pdf_bytes,
+                    mime_type='application/pdf'
+                ),
+                prompt
+            ],
+            config={
+                "temperature": 0.3,
+                "max_output_tokens": 4000,
+                "response_mime_type": "application/json",
+            }
+        )
+        
+        # Parse the response
+        try:
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.startswith('```'):
+                response_text = response_text[3:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
+                
+            proof_data = parse_json_with_latex(response_text)
+            
+            # Process proof steps
+            proof_steps_data = proof_data.get("proof_steps", [])
+            proof_steps = [ProofStep(**step) for step in proof_steps_data]
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to parse proof completion from AI response: {str(e)}\nResponse: {response.text}"
+            )
+        
+        return ProofCompletionResponse(
+            theorem_or_question=request.theorem_or_question,
+            proof_guidelines=request.proof_guidelines,
+            complete_proof=proof_data.get("complete_proof", ""),
+            proof_steps=proof_steps,
+            source_pages=request.pages,
+            proof_summary=proof_data.get("proof_summary", "Proof completed successfully")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Proof completion failed: {str(e)}")      
+
 @app.get("/")
 async def root():
     return {"message": "PDF Analysis API - Use /generate-topic-tree, /generate-flashcards, /generate-flashcards-from-leaves, and /generate-custom-flashcards endpoints"}

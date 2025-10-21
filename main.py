@@ -1376,6 +1376,409 @@ async def analyze_proof(request: ProofAnalysisRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Proof analysis failed: {str(e)}")
 
+from google.cloud import texttospeech
+import base64
+from pydub import AudioSegment
+import tempfile
+import io as python_io
+
+# Initialize Text-to-Speech client
+tts_client = texttospeech.TextToSpeechClient()
+
+# New Pydantic Models for Multi-Speaker Podcast
+class DialogueLine(BaseModel):
+    speaker: str  # "host" or "expert"
+    text: str
+    voice_name: str
+
+class PodcastScript(BaseModel):
+    title: str
+    introduction: str
+    dialogues: List[DialogueLine]
+    conclusion: str
+
+class MultiSpeakerPodcastRequest(BaseModel):
+    pdf_url: HttpUrl
+    pages: List[int]
+    prompt: str
+    host_voice: Optional[str] = "en-US-Standard-D"  # Male voice
+    expert_voice: Optional[str] = "en-US-Standard-E"  # Female voice
+    speaking_rate: Optional[float] = 1.0
+    pitch: Optional[float] = 0.0
+    audio_encoding: Optional[str] = "MP3"
+    include_pauses: Optional[bool] = True
+    pause_duration: Optional[float] = 0.5  # seconds
+
+class MultiSpeakerPodcastResponse(BaseModel):
+    audio_content: str  # Base64 encoded audio
+    script: PodcastScript
+    total_pages_processed: int
+    voices_used: Dict[str, str]
+    audio_format: str
+    duration_estimate: float
+    segment_count: int
+
+# New Utility Functions for Multi-Speaker Podcast
+def generate_dialogue_script(pdf_content: bytes, pages: List[int], prompt: str) -> PodcastScript:
+    """
+    Generate a podcast script with host-expert dialogue using Gemini
+    """
+    try:
+        enhanced_prompt = f"""
+        Create an engaging, educational podcast script with dialogue between a HOST and an EXPERT based on the provided PDF content.
+        
+        USER REQUEST: {prompt}
+        
+        IMPORTANT PAGE NUMBERING:
+        - The provided PDF contains pages {pages} from the original document.
+        - When referring to content locations, ALWAYS mention the original page numbers: {pages}
+        
+        SCRIPT STRUCTURE:
+        1. Title: A catchy title for the podcast
+        2. Introduction: Host introduces the topic and expert
+        3. Dialogues: Alternating dialogue between Host and Expert
+        4. Conclusion: Host summarizes key points and thanks expert
+        
+        DIALOGUE REQUIREMENTS:
+        - Create natural, conversational dialogue
+        - Host should ask questions, guide the conversation, and provide context
+        - Expert should provide detailed explanations, insights, and technical details
+        - Include 8-15 dialogue exchanges (back and forth)
+        - Make the dialogue engaging and educational
+        - Host should occasionally summarize or clarify complex points
+        - Expert should use examples and analogies when appropriate
+        
+        CHARACTER ROLES:
+        - HOST: Curious, engaging, good at asking clarifying questions, maintains flow
+        - EXPERT: Knowledgeable, authoritative, but able to explain complex topics simply
+        
+        RETURN FORMAT:
+        You MUST return a valid JSON object with this exact structure:
+        {{
+            "title": "Podcast Title",
+            "introduction": "Host's introduction text here...",
+            "dialogues": [
+                {{"speaker": "host", "text": "Host dialogue text..."}},
+                {{"speaker": "expert", "text": "Expert response text..."}},
+                {{"speaker": "host", "text": "Follow up question..."}},
+                {{"speaker": "expert", "text": "Detailed explanation..."}}
+            ],
+            "conclusion": "Host's concluding remarks..."
+        }}
+        
+        Ensure the dialogue flows naturally and covers the key concepts from the PDF.
+        """
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-pro",
+            contents=[
+                types.Part.from_bytes(
+                    data=pdf_content,
+                    mime_type='application/pdf'
+                ),
+                enhanced_prompt
+            ],
+            config={
+                "temperature": 0.8,
+                "response_mime_type": "application/json",
+            }
+        )
+        
+        # Parse the JSON response
+        response_text = response.text.strip()
+        if response_text.startswith('```json'):
+            response_text = response_text[7:]
+        if response_text.startswith('```'):
+            response_text = response_text[3:]
+        if response_text.endswith('```'):
+            response_text = response_text[:-3]
+            
+        script_data = json.loads(response_text)
+        
+        # Validate and create PodcastScript object
+        return PodcastScript(**script_data)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Dialogue script generation failed: {str(e)}")
+
+def generate_audio_segment(text: str, voice_name: str, speaking_rate: float, pitch: float, audio_encoding: str) -> bytes:
+    """
+    Generate audio for a single text segment
+    """
+    synthesis_input = texttospeech.SynthesisInput(text=text)
+    
+    encoding_map = {
+        "MP3": texttospeech.AudioEncoding.MP3,
+        "LINEAR16": texttospeech.AudioEncoding.LINEAR16,
+        "OGG_OPUS": texttospeech.AudioEncoding.OGG_OPUS
+    }
+    
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=encoding_map.get(audio_encoding, texttospeech.AudioEncoding.MP3),
+        speaking_rate=speaking_rate,
+        pitch=pitch,
+        effects_profile_id=["headphone-class-device"]
+    )
+    
+    voice = texttospeech.VoiceSelectionParams(
+        language_code=voice_name.split("-")[0] + "-" + voice_name.split("-")[1],
+        name=voice_name
+    )
+    
+    response = tts_client.synthesize_speech(
+        input=synthesis_input,
+        voice=voice,
+        audio_config=audio_config
+    )
+    
+    return response.audio_content
+
+def add_pause(audio_segment: AudioSegment, pause_duration: float) -> AudioSegment:
+    """
+    Add a pause to an audio segment
+    """
+    pause = AudioSegment.silent(duration=int(pause_duration * 1000))  # pydub works in milliseconds
+    return audio_segment + pause
+
+def concatenate_audio_segments(segments: List[bytes], pause_duration: float, audio_encoding: str) -> bytes:
+    """
+    Concatenate multiple audio segments with pauses between them
+    """
+    if not segments:
+        raise ValueError("No audio segments to concatenate")
+    
+    # Convert encoding string to pydub format
+    encoding_map = {
+        "MP3": "mp3",
+        "LINEAR16": "wav",
+        "OGG_OPUS": "ogg"
+    }
+    
+    format_name = encoding_map.get(audio_encoding, "mp3")
+    
+    # Load first segment
+    combined = AudioSegment.from_file(python_io.BytesIO(segments[0]), format=format_name)
+    
+    # Add remaining segments with pauses
+    for i in range(1, len(segments)):
+        # Add pause
+        if pause_duration > 0:
+            pause = AudioSegment.silent(duration=int(pause_duration * 1000))
+            combined = combined + pause
+        
+        # Add next segment
+        next_segment = AudioSegment.from_file(python_io.BytesIO(segments[i]), format=format_name)
+        combined = combined + next_segment
+    
+    # Export combined audio
+    output_buffer = python_io.BytesIO()
+    combined.export(output_buffer, format=format_name)
+    output_buffer.seek(0)
+    
+    return output_buffer.getvalue()
+
+def generate_multi_speaker_audio(
+    script: PodcastScript, 
+    host_voice: str, 
+    expert_voice: str, 
+    speaking_rate: float, 
+    pitch: float, 
+    audio_encoding: str,
+    include_pauses: bool,
+    pause_duration: float
+) -> tuple[bytes, float, int]:
+    """
+    Generate multi-speaker audio by creating segments for each dialogue line and concatenating them
+    """
+    try:
+        audio_segments = []
+        total_duration = 0
+        segment_count = 0
+        
+        # Generate audio for introduction
+        print(f"Generating introduction audio with voice: {host_voice}")
+        intro_audio = generate_audio_segment(
+            script.introduction, host_voice, speaking_rate, pitch, audio_encoding
+        )
+        audio_segments.append(intro_audio)
+        segment_count += 1
+        
+        # Estimate duration for introduction (rough calculation)
+        intro_word_count = len(script.introduction.split())
+        total_duration += (intro_word_count / 150) * 60  # 150 words per minute
+        
+        if include_pauses and pause_duration > 0:
+            pause_audio = AudioSegment.silent(duration=int(pause_duration * 1000))
+            # For pause, we'll create a silent segment in the same format
+            pause_buffer = python_io.BytesIO()
+            pause_audio.export(pause_buffer, format="mp3" if audio_encoding == "MP3" else audio_encoding.lower())
+            audio_segments.append(pause_buffer.getvalue())
+            total_duration += pause_duration
+        
+        # Generate audio for each dialogue line
+        for i, dialogue in enumerate(script.dialogues):
+            voice_to_use = host_voice if dialogue.speaker == "host" else expert_voice
+            print(f"Generating audio for {dialogue.speaker} line {i+1} with voice: {voice_to_use}")
+            
+            dialogue_audio = generate_audio_segment(
+                dialogue.text, voice_to_use, speaking_rate, pitch, audio_encoding
+            )
+            audio_segments.append(dialogue_audio)
+            segment_count += 1
+            
+            # Estimate duration for this dialogue
+            dialogue_word_count = len(dialogue.text.split())
+            total_duration += (dialogue_word_count / 150) * 60
+            
+            # Add pause between dialogues (but not after the last one)
+            if include_pauses and pause_duration > 0 and i < len(script.dialogues) - 1:
+                pause_audio = AudioSegment.silent(duration=int(pause_duration * 1000))
+                pause_buffer = python_io.BytesIO()
+                pause_audio.export(pause_buffer, format="mp3" if audio_encoding == "MP3" else audio_encoding.lower())
+                audio_segments.append(pause_buffer.getvalue())
+                total_duration += pause_duration
+        
+        # Add pause before conclusion if needed
+        if include_pauses and pause_duration > 0 and script.dialogues:
+            pause_audio = AudioSegment.silent(duration=int(pause_duration * 1000))
+            pause_buffer = python_io.BytesIO()
+            pause_audio.export(pause_buffer, format="mp3" if audio_encoding == "MP3" else audio_encoding.lower())
+            audio_segments.append(pause_buffer.getvalue())
+            total_duration += pause_duration
+        
+        # Generate audio for conclusion
+        print(f"Generating conclusion audio with voice: {host_voice}")
+        conclusion_audio = generate_audio_segment(
+            script.conclusion, host_voice, speaking_rate, pitch, audio_encoding
+        )
+        audio_segments.append(conclusion_audio)
+        segment_count += 1
+        
+        # Estimate duration for conclusion
+        conclusion_word_count = len(script.conclusion.split())
+        total_duration += (conclusion_word_count / 150) * 60
+        
+        # Concatenate all audio segments
+        print(f"Concatenating {len(audio_segments)} audio segments...")
+        final_audio = concatenate_audio_segments(audio_segments, 0, audio_encoding)  # No additional pauses since we already added them
+        
+        return final_audio, total_duration, segment_count
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Multi-speaker audio generation failed: {str(e)}")
+
+# Enhanced Podcast API Endpoint with Multiple Speakers
+@app.post("/generate-multi-speaker-podcast", response_model=MultiSpeakerPodcastResponse)
+async def generate_multi_speaker_podcast(request: MultiSpeakerPodcastRequest):
+    """
+    Generate a multi-speaker podcast (host + expert) with different voices from specified PDF pages
+    """
+    try:
+        # Validate voice parameters
+        validate_voice_parameters(request.host_voice, request.speaking_rate, request.pitch)
+        validate_voice_parameters(request.expert_voice, request.speaking_rate, request.pitch)
+        
+        # Download PDF from URL
+        pdf_bytes = download_pdf_from_url(str(request.pdf_url))
+        
+        # Split PDF to keep only specified pages
+        split_pdf_bytes = split_pdf_by_pages(pdf_bytes, request.pages)
+        
+        # Generate dialogue script using Gemini
+        script = generate_dialogue_script(split_pdf_bytes, request.pages, request.prompt)
+        
+        # Assign voice names to dialogue lines in the script
+        for dialogue in script.dialogues:
+            dialogue.voice_name = request.host_voice if dialogue.speaker == "host" else request.expert_voice
+        
+        # Generate multi-speaker audio
+        final_audio, estimated_duration, segment_count = generate_multi_speaker_audio(
+            script=script,
+            host_voice=request.host_voice,
+            expert_voice=request.expert_voice,
+            speaking_rate=request.speaking_rate,
+            pitch=request.pitch,
+            audio_encoding=request.audio_encoding,
+            include_pauses=request.include_pauses,
+            pause_duration=request.pause_duration
+        )
+        
+        # Encode final audio to base64
+        audio_base64 = base64.b64encode(final_audio).decode('utf-8')
+        
+        return MultiSpeakerPodcastResponse(
+            audio_content=audio_base64,
+            script=script,
+            total_pages_processed=len(request.pages),
+            voices_used={
+                "host": request.host_voice,
+                "expert": request.expert_voice
+            },
+            audio_format=request.audio_encoding,
+            duration_estimate=estimated_duration,
+            segment_count=segment_count
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Multi-speaker podcast generation failed: {str(e)}")
+
+
+
+# Optional: Enhanced available voices endpoint
+@app.get("/available-voices")
+async def get_available_voices(language_code: str = "en"):
+    """
+    Get list of available TTS voices for a language code
+    """
+    try:
+        voices = tts_client.list_voices(language_code=language_code)
+        
+        available_voices = []
+        for voice in voices.voices:
+            voice_info = {
+                "name": voice.name,
+                "language_codes": list(voice.language_codes),
+                "ssml_gender": texttospeech.SsmlVoiceGender(voice.ssml_gender).name,
+                "natural_sample_rate_hertz": voice.natural_sample_rate_hertz
+            }
+            available_voices.append(voice_info)
+        
+        return {
+            "language_code": language_code,
+            "available_voices": available_voices
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch available voices: {str(e)}")
+
+# Helper function to validate voices (update existing one)
+def validate_voice_parameters(voice_name: str, speaking_rate: float, pitch: float) -> None:
+    """
+    Validate TTS parameters
+    """
+    # Validate speaking rate (0.25 to 4.0)
+    if not 0.25 <= speaking_rate <= 4.0:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Speaking rate must be between 0.25 and 4.0, got {speaking_rate}"
+        )
+    
+    # Validate pitch (-20.0 to 20.0)
+    if not -20.0 <= pitch <= 20.0:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Pitch must be between -20.0 and 20.0, got {pitch}"
+        )
+    
+    # Basic voice name validation
+    if not voice_name or len(voice_name.split("-")) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid voice name format. Expected format like 'en-US-Standard-D', got {voice_name}"
+        )
+
 @app.get("/")
 async def root():
     return {"message": "PDF Analysis API - Use /generate-topic-tree, /generate-flashcards, /generate-flashcards-from-leaves, and /generate-custom-flashcards endpoints"}

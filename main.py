@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import requests
 import PyPDF2
 import io

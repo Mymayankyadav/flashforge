@@ -1447,6 +1447,7 @@ def generate_dialogue_script(pdf_content: bytes, pages: List[int], prompt: str) 
         - Make the dialogue engaging and educational
         - Host should occasionally summarize or clarify complex points
         - Expert should use examples and analogies when appropriate
+        - Make sure to not contain latex or anything with escapes. Enunciate the latex symbols.
         
         CHARACTER ROLES:
         - HOST: Curious, engaging, good at asking clarifying questions, maintains flow
@@ -1472,7 +1473,7 @@ def generate_dialogue_script(pdf_content: bytes, pages: List[int], prompt: str) 
         """
         
         response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.5-pro",
             contents=[
                 types.Part.from_bytes(
                     data=pdf_content,

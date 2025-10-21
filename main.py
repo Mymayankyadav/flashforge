@@ -1401,8 +1401,8 @@ class MultiSpeakerPodcastRequest(BaseModel):
     pdf_url: HttpUrl
     pages: List[int]
     prompt: str
-    host_voice: Optional[str] = "en-US-Standard-D"  # Male voice
-    expert_voice: Optional[str] = "en-US-Standard-E"  # Female voice
+    host_voice: Optional[str] = "en-US-Chirp-HD-F"  # Male voice
+    expert_voice: Optional[str] = "en-US-Chirp-HD-D"  # Female voice
     speaking_rate: Optional[float] = 1.0
     pitch: Optional[float] = 0.0
     audio_encoding: Optional[str] = "MP3"

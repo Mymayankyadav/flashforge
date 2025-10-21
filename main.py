@@ -1389,7 +1389,7 @@ tts_client = texttospeech.TextToSpeechClient()
 class DialogueLine(BaseModel):
     speaker: str  # "host" or "expert"
     text: str
-    voice_name: str
+    voice_name: Optional[str] = None  # Make this optional
 
 class PodcastScript(BaseModel):
     title: str
@@ -1465,6 +1465,8 @@ def generate_dialogue_script(pdf_content: bytes, pages: List[int], prompt: str) 
             ],
             "conclusion": "Host's concluding remarks..."
         }}
+        
+        IMPORTANT: Do NOT include "voice_name" in the dialogue objects. Only include "speaker" and "text".
         
         Ensure the dialogue flows naturally and covers the key concepts from the PDF.
         """
@@ -1617,6 +1619,7 @@ def generate_multi_speaker_audio(
         
         # Generate audio for each dialogue line
         for i, dialogue in enumerate(script.dialogues):
+            # Determine voice based on speaker role, not from dialogue.voice_name
             voice_to_use = host_voice if dialogue.speaker == "host" else expert_voice
             print(f"Generating audio for {dialogue.speaker} line {i+1} with voice: {voice_to_use}")
             
@@ -1687,10 +1690,6 @@ async def generate_multi_speaker_podcast(request: MultiSpeakerPodcastRequest):
         # Generate dialogue script using Gemini
         script = generate_dialogue_script(split_pdf_bytes, request.pages, request.prompt)
         
-        # Assign voice names to dialogue lines in the script
-        for dialogue in script.dialogues:
-            dialogue.voice_name = request.host_voice if dialogue.speaker == "host" else request.expert_voice
-        
         # Generate multi-speaker audio
         final_audio, estimated_duration, segment_count = generate_multi_speaker_audio(
             script=script,
@@ -1724,6 +1723,31 @@ async def generate_multi_speaker_podcast(request: MultiSpeakerPodcastRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Multi-speaker podcast generation failed: {str(e)}")
 
+# Helper function to validate voices
+def validate_voice_parameters(voice_name: str, speaking_rate: float, pitch: float) -> None:
+    """
+    Validate TTS parameters
+    """
+    # Validate speaking rate (0.25 to 4.0)
+    if not 0.25 <= speaking_rate <= 4.0:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Speaking rate must be between 0.25 and 4.0, got {speaking_rate}"
+        )
+    
+    # Validate pitch (-20.0 to 20.0)
+    if not -20.0 <= pitch <= 20.0:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Pitch must be between -20.0 and 20.0, got {pitch}"
+        )
+    
+    # Basic voice name validation
+    if not voice_name or len(voice_name.split("-")) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid voice name format. Expected format like 'en-US-Standard-D', got {voice_name}"
+        )
 
 
 # Optional: Enhanced available voices endpoint
@@ -1752,32 +1776,6 @@ async def get_available_voices(language_code: str = "en"):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch available voices: {str(e)}")
-
-# Helper function to validate voices (update existing one)
-def validate_voice_parameters(voice_name: str, speaking_rate: float, pitch: float) -> None:
-    """
-    Validate TTS parameters
-    """
-    # Validate speaking rate (0.25 to 4.0)
-    if not 0.25 <= speaking_rate <= 4.0:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Speaking rate must be between 0.25 and 4.0, got {speaking_rate}"
-        )
-    
-    # Validate pitch (-20.0 to 20.0)
-    if not -20.0 <= pitch <= 20.0:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Pitch must be between -20.0 and 20.0, got {pitch}"
-        )
-    
-    # Basic voice name validation
-    if not voice_name or len(voice_name.split("-")) < 3:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid voice name format. Expected format like 'en-US-Standard-D', got {voice_name}"
-        )
 
 @app.get("/")
 async def root():

@@ -5,3 +5,5 @@ PyPDF2
 google-genai
 requests
 python-multipart
+google-cloud-texttospeech
+pydub

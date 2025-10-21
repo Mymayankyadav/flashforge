@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     g++ \
     build-essential \
     curl \
+    ffmpeg\
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first to leverage Docker cache

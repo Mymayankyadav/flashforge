@@ -15,9 +15,10 @@ RUN apt-get update && apt-get install -y \
     g++ \
     build-essential \
     curl \
-    ffmpeg\
+    ffmpeg \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
-
+    
 # Copy requirements first to leverage Docker cache
 COPY requirements.txt .
 

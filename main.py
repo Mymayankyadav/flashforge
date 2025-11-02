@@ -1823,9 +1823,9 @@ async def ocr_image_to_latex(request: ImageOCRRequest):
         FOR HANDWRITTEN MATHEMATICS:
         - Convert handwritten equations to proper LaTeX syntax
         - Use $...$ for inline math and $$...$$ for display math
-        - Handle fractions: ½ → \\frac{1}{2}
+        - Handle fractions: ½ → \\frac{{1}}{{2}}
         - Handle exponents: x² → x^2
-        - Handle square roots: √x → \\sqrt{x}
+        - Handle square roots: √x → \\sqrt{{x}}
         - Handle Greek letters: α, β, γ → \\alpha, \\beta, \\gamma
         - Handle operators: × → \\times, ÷ → \\div, ± → \\pm
         - Handle relations: ≤ → \\leq, ≥ → \\geq, ≠ → \\neq
@@ -1918,7 +1918,7 @@ async def format_plain_text(request: TextFormattingRequest):
         prompt = f"""
         UNFORMATTED TEXT: "{request.unformatted_text}"
         
-        TARGET DOMAIN: {request.domain_hint}
+        TARGET DOMAIN: {request.target_domain}
         FORMATTING LEVEL: {request.formatting_level}
         
         TASK:
@@ -1933,12 +1933,12 @@ async def format_plain_text(request: TextFormattingRequest):
         - Sets: i in V → $i \\in V$
         - Functions: f(x) → $f(x)$
         - Equations: E = mc² → $E = mc^2$
-        - Fractions: 1/2 → $\\frac{1}{2}$, (a+b)/c → $\\frac{a+b}{c}$
-        - Greek letters: alpha → $\\alpha$, beta → $\\beta$, Gamma → $\\Gamma$
-        - Operators: sum, product → $\\sum$, $\\prod$
-        - Relations: <= → $\\leq$, >= → $\\geq$, != → $\\neq$, ≈ → $\\approx$
-        - Derivatives: df/dx → $\\frac{df}{dx}$, ∂f/∂x → $\\frac{\\partial f}{\\partial x}$
-        - Integrals: ∫ f(x) dx → $\\int f(x) dx$
+        - Fractions: 1/2 → \\frac{{1}}{{2}}, (a+b)/c → \\frac{{a+b}}{{c}}
+        - Greek letters: alpha → \\alpha, beta → \\beta, Gamma → \\Gamma
+        - Operators: sum, product → \\sum, \\prod
+        - Relations: <= → \\leq, >= → \\geq, != → \\neq, ≈ → \\approx
+        - Derivatives: df/dx → \\frac{{df}}{{dx}}, ∂f/∂x → \\frac{{\\partial f}}{{\\partial x}}
+        - Integrals: ∫ f(x) dx → \\int f(x) dx
         
         PROGRAMMING/COMPUTER SCIENCE:
         - Code blocks: Use ```language ... ``` for multi-line code
@@ -2010,7 +2010,7 @@ async def format_plain_text(request: TextFormattingRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Text formatting failed: {str(e)}")
-
+        
 @app.get("/")
 async def root():
     return {"message": "PDF Analysis API - Use /generate-topic-tree, /generate-flashcards, /generate-flashcards-from-leaves, and /generate-custom-flashcards endpoints"}

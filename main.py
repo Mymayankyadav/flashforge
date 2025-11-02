@@ -1777,6 +1777,239 @@ async def get_available_voices(language_code: str = "en"):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch available voices: {str(e)}")
+class ImageOCRRequest(BaseModel):
+    image_base64: str
+    domain_hint: str = "mathematics"  # mathematics, physics, general, etc.
+
+class ImageOCRResponse(BaseModel):
+    raw_text: str
+    latex_formatted: str
+    markdown_formatted: str
+    confidence_notes: List[str]
+
+@app.post("/ocr-image-to-latex", response_model=ImageOCRResponse)
+async def ocr_image_to_latex(request: ImageOCRRequest):
+    """
+    Extract text from base64 image using Gemini OCR and format with LaTeX and Markdown
+    Typically used for handwritten math equations and notes
+    """
+    try:
+        # Remove data URL prefix if present
+        image_data = request.image_base64
+        if ',' in image_data:
+            image_data = image_data.split(',', 1)[1]
+        
+        # Decode base64 image
+        try:
+            image_bytes = base64.b64decode(image_data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {str(e)}")
+        
+        # Verify it's a valid image (basic check)
+        if len(image_bytes) < 100:  # Arbitrary minimum size
+            raise HTTPException(status_code=400, detail="Image data too small to be valid")
+        
+        # Enhanced prompt for handwritten math OCR and formatting
+        prompt = f"""
+        Analyze this handwritten image and perform OCR to extract the text content.
+        
+        DOMAIN CONTEXT: {request.domain_hint}
+        
+        IMPORTANT INSTRUCTIONS:
+        1. First, extract the raw text exactly as it appears in the image
+        2. Then create a properly formatted LaTeX version with correct mathematical notation
+        3. Finally, create a Markdown version with proper formatting for readability
+        
+        FOR HANDWRITTEN MATHEMATICS:
+        - Convert handwritten equations to proper LaTeX syntax
+        - Use $...$ for inline math and $$...$$ for display math
+        - Handle fractions: ½ → \\frac{1}{2}
+        - Handle exponents: x² → x^2
+        - Handle square roots: √x → \\sqrt{x}
+        - Handle Greek letters: α, β, γ → \\alpha, \\beta, \\gamma
+        - Handle operators: × → \\times, ÷ → \\div, ± → \\pm
+        - Handle relations: ≤ → \\leq, ≥ → \\geq, ≠ → \\neq
+        - Handle integrals: ∫ → \\int, ∑ → \\sum, ∏ → \\prod
+        - Handle arrows: → → \\rightarrow, ← → \\leftarrow
+        
+        FOR GENERAL TEXT:
+        - Use **bold** for headings and important terms
+        - Use *italics* for emphasis
+        - Use bullet points for lists
+        - Preserve the original structure and flow
+        
+        Return your response as valid JSON with this exact structure:
+        {{
+            "raw_text": "The raw extracted text exactly as recognized",
+            "latex_formatted": "The content formatted with proper LaTeX syntax",
+            "markdown_formatted": "The content formatted with Markdown for readability",
+            "confidence_notes": [
+                "Note about any ambiguous characters",
+                "Note about formatting decisions made"
+            ]
+        }}
+        """
+        
+        # Use Gemini for image analysis and OCR
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp",  # Using flash model for faster OCR
+            contents=[
+                types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type='image/jpeg'  # Will work for PNG too as Gemini handles multiple formats
+                ),
+                prompt
+            ],
+            config={
+                "temperature": 0.1,  # Low temperature for consistent OCR
+                "response_mime_type": "application/json",
+            }
+        )
+        
+        # Parse the response
+        try:
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.startswith('```'):
+                response_text = response_text[3:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
+                
+            ocr_data = parse_json_with_latex(response_text)
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to parse OCR response from AI: {str(e)}\nResponse: {response.text}"
+            )
+        
+        return ImageOCRResponse(
+            raw_text=ocr_data.get("raw_text", ""),
+            latex_formatted=ocr_data.get("latex_formatted", ""),
+            markdown_formatted=ocr_data.get("markdown_formatted", ""),
+            confidence_notes=ocr_data.get("confidence_notes", [])
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image OCR processing failed: {str(e)}")
+
+class TextFormattingRequest(BaseModel):
+    unformatted_text: str
+    target_domain: str = "mathematics"  # mathematics, programming, physics, general
+    formatting_level: str = "comprehensive"  # minimal, moderate, comprehensive
+
+class TextFormattingResponse(BaseModel):
+    original_text: str
+    formatted_text: str
+    improvements_made: List[str]
+    formatting_type: str  # latex, markdown, mixed
+
+@app.post("/format-plain-text", response_model=TextFormattingResponse)
+async def format_plain_text(request: TextFormattingRequest):
+    """
+    Improve formatting of plain unformatted text using LaTeX and Markdown
+    Similar to /improve-formatting but without PDF context
+    """
+    try:
+        # Enhanced prompt for text-only formatting
+        prompt = f"""
+        UNFORMATTED TEXT: "{request.unformatted_text}"
+        
+        TARGET DOMAIN: {request.domain_hint}
+        FORMATTING LEVEL: {request.formatting_level}
+        
+        TASK:
+        Convert this unformatted text into properly structured content using LaTeX for mathematics
+        and Markdown for general text formatting. The text does not come from a PDF - it's raw
+        input that needs intelligent formatting.
+        
+        DOMAIN-SPECIFIC FORMATTING RULES:
+        
+        MATHEMATICS/PHYSICS:
+        - Variables: x, y, z → $x$, $y$, $z$
+        - Sets: i in V → $i \\in V$
+        - Functions: f(x) → $f(x)$
+        - Equations: E = mc² → $E = mc^2$
+        - Fractions: 1/2 → $\\frac{1}{2}$, (a+b)/c → $\\frac{a+b}{c}$
+        - Greek letters: alpha → $\\alpha$, beta → $\\beta$, Gamma → $\\Gamma$
+        - Operators: sum, product → $\\sum$, $\\prod$
+        - Relations: <= → $\\leq$, >= → $\\geq$, != → $\\neq$, ≈ → $\\approx$
+        - Derivatives: df/dx → $\\frac{df}{dx}$, ∂f/∂x → $\\frac{\\partial f}{\\partial x}$
+        - Integrals: ∫ f(x) dx → $\\int f(x) dx$
+        
+        PROGRAMMING/COMPUTER SCIENCE:
+        - Code blocks: Use ```language ... ``` for multi-line code
+        - Inline code: Use `code` for short snippets
+        - Variables and functions: Use `monospace` for code elements in text
+        - Data structures: Use **bold** for important concepts
+        
+        GENERAL ACADEMIC TEXT:
+        - **Bold** for definitions and key terms
+        - *Italics* for emphasis and book titles
+        - Use headings with ## for sections
+        - Use bullet points (- or *) for lists
+        - Use numbered lists for sequences
+        - Use blockquotes (> ) for important notes
+        
+        FORMATTING LEVELS:
+        - Minimal: Only convert obvious mathematical expressions
+        - Moderate: Add basic structure and clear mathematical formatting
+        - Comprehensive: Full formatting with sections, emphasis, and detailed mathematical typesetting
+        
+        Return your response as valid JSON with this exact structure:
+        {{
+            "formatted_text": "The fully formatted text with LaTeX and Markdown",
+            "improvements_made": [
+                "Converted variables to LaTeX",
+                "Added section headers",
+                "Formatted mathematical equations",
+                "Applied code formatting"
+            ],
+            "formatting_type": "mixed"  # or "latex", "markdown" depending on content
+        }}
+        """
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[prompt],
+            config={
+                "temperature": 0.3,
+                "response_mime_type": "application/json",
+            }
+        )
+        
+        # Parse the response
+        try:
+            response_text = response.text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]
+            if response_text.startswith('```'):
+                response_text = response_text[3:]
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]
+                
+            formatting_data = parse_json_with_latex(response_text)
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to parse text formatting response: {str(e)}\nResponse: {response.text}"
+            )
+        
+        return TextFormattingResponse(
+            original_text=request.unformatted_text,
+            formatted_text=formatting_data.get("formatted_text", request.unformatted_text),
+            improvements_made=formatting_data.get("improvements_made", []),
+            formatting_type=formatting_data.get("formatting_type", "mixed")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Text formatting failed: {str(e)}")
 
 @app.get("/")
 async def root():

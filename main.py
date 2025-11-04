@@ -1852,7 +1852,7 @@ async def ocr_image_to_latex(request: ImageOCRRequest):
         
         # Use Gemini for image analysis and OCR
         response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",  # Using flash model for faster OCR
+            model="gemini-2.5-flash",  # Using flash model for faster OCR
             contents=[
                 types.Part.from_bytes(
                     data=image_bytes,

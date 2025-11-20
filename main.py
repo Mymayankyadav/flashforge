@@ -313,7 +313,7 @@ async def generate_topic_tree(request: TopicTreeRequest):
         
         # Use Gemini to analyze the PDF bytes directly
         response = client.models.generate_content(
-            model="gemini-2.5-pro",
+            model="gemini-3-pro-preview",
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,

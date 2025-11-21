@@ -1473,7 +1473,7 @@ def generate_dialogue_script(pdf_content: bytes, pages: List[int], prompt: str) 
         """
         
         response = client.models.generate_content(
-            model="gemini-2.5-pro",
+            model="gemini-3-pro-preview",
             contents=[
                 types.Part.from_bytes(
                     data=pdf_content,

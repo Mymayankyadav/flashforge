@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
 from typing import List, Optional, Dict, Any
@@ -416,7 +417,7 @@ async def generate_flashcards(request: FlashcardRequest):
         """
         
         response = client.models.generate_content(
-            model="gemini-3-pro-preview",
+            model="gemini-2.5-pro,
             contents=[
                 types.Part.from_bytes(
                     data=split_pdf_bytes,
